@@ -182,6 +182,21 @@ func completeGenericCmd(method string, showAPIs bool) func(cmd *cobra.Command, a
 	}
 }
 
+// rootHelpTemplate renders the operation's prose, then Cobra's Usage/Flags,
+// then the response-format block that Operation.Command parked in
+// HelpAfterUsageAnnotation — so flags stay near the top of --help.
+const rootHelpTemplate = `{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces | highlight}}
+
+{{end}}{{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}{{if .Annotations}}{{with index .Annotations "` + HelpAfterUsageAnnotation + `"}}
+
+Format of the response:
+
+{{. | trimTrailingWhitespaces | highlight}}
+{{end}}{{end}}{{if not .HasParent}}
+Documentation: https://agents.asksurf.ai/llms.txt
+Report issues: https://github.com/asksurf-ai/surf-cli/issues
+{{end}}`
+
 // Init will set up the CLI.
 func Init(name string, version string) {
 	initConfig(name, "")
@@ -238,8 +253,8 @@ func Init(name string, version string) {
 		return s
 	})
 
-	// The help template inlines the HelpAfterUsageAnnotation below
-	// Usage/Flags; see splitHelpBlocks. Nothing else is needed here.
+	// The help template below inlines the HelpAfterUsageAnnotation after
+	// Usage/Flags; see splitHelpBlocks.
 
 	Root = &cobra.Command{
 		Use:     filepath.Base(os.Args[0]),
@@ -267,17 +282,7 @@ func Init(name string, version string) {
 		&cobra.Group{ID: "api", Title: "Available API Commands:"},
 		&cobra.Group{ID: "generic", Title: "Generic Commands:"},
 	)
-	Root.SetHelpTemplate(`{{with (or .Long .Short)}}{{. | trimTrailingWhitespaces | highlight}}
-
-{{end}}{{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}{{if .Annotations}}{{with index .Annotations "surf-help-after-usage"}}
-
-Format of the response:
-
-{{. | trimTrailingWhitespaces | highlight}}
-{{end}}{{end}}{{if not .HasParent}}
-Documentation: https://agents.asksurf.ai/llms.txt
-Report issues: https://github.com/asksurf-ai/surf-cli/issues
-{{end}}`)
+	Root.SetHelpTemplate(rootHelpTemplate)
 
 	head := &cobra.Command{
 		GroupID:           "generic",

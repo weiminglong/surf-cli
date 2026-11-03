@@ -1,12 +1,13 @@
 package cli
 
 import (
+	"strconv"
 	"strings"
 )
 
 // HelpAfterUsageAnnotation is the command annotation that carries the
 // response-format block rendered below Usage/Flags. Set by Operation.Command
-// and consumed by the "afterUsage" help-template function in cli.go.
+// and inlined by the help template in cli.go.
 const HelpAfterUsageAnnotation = "surf-help-after-usage"
 
 // splitHelpBlocks splits an operation's Long description into the prose that
@@ -24,14 +25,15 @@ const HelpAfterUsageAnnotation = "surf-help-after-usage"
 //   - `## Option Schema:`     — duplicates Cobra's `Flags:` section exactly
 //
 // Returned separately in `below` (rendered after Usage/Flags):
-//   - `## Response <code>`    — success response field names/types
-//   - `## Responses <codes>`  — merged response schemas
+//   - `## Response 2xx`       — success response field names/types
+//   - `## Responses 2xx`      — merged success schemas
 //
 // Kept in `above`:
 //   - `## Input Example`      — concrete example body
 //   - `## Request Schema`     — body field shapes not in Cobra Flags
-//   - `## Response default` / error responses — the error envelope is small
-//     and stays where the reader is already looking
+//   - Every error response (`default`, 4xx, 5xx) — recovery guidance such as
+//     `recommended_action: use_async_job` belongs next to the call, not after
+//     the flags
 //   - User-authored prose (`## Rules`, `## Example`, ...)
 //
 // See docs/CLI_DESIGN_PRINCIPLES.md §3.5 and
@@ -94,9 +96,9 @@ var fieldDescriptionsKept = map[string]bool{
 }
 
 // compactResponseSchemas rewrites each ```schema fence in the response block:
-// top-level keys stay, nested data object keys stay as names only, and meta is
-// pruned to the decision fields. The full schema remains in --shape output and
-// in the published OpenAPI spec.
+// $schema is dropped, meta is pruned to the decision fields, and field doc
+// comments keep only their first sentence. The full, unabridged descriptions
+// remain in the published OpenAPI spec.
 func compactResponseSchemas(block string) string {
 	if block == "" {
 		return ""
@@ -104,13 +106,30 @@ func compactResponseSchemas(block string) string {
 	lines := strings.Split(block, "\n")
 	out := make([]string, 0, len(lines))
 	inSchema := false
-	scope := ""      // top-level property whose body we are inside: "data" or "meta"
-	scopeIndent := 0 // indentation of that property's opening line
+	type frame struct {
+		key  string
+		keep bool
+	}
+	var stack []frame
+
+	keepCurrent := func() bool {
+		if len(stack) == 0 {
+			return true
+		}
+		return stack[len(stack)-1].keep
+	}
+	currentKey := func() string {
+		if len(stack) == 0 {
+			return ""
+		}
+		return stack[len(stack)-1].key
+	}
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			inSchema = !inSchema
-			scope = ""
+			stack = nil
 			out = append(out, line)
 			continue
 		}
@@ -119,47 +138,62 @@ func compactResponseSchemas(block string) string {
 			continue
 		}
 
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
-		if scope != "" && indent <= scopeIndent {
-			scope = ""
-		}
-
-		switch {
-		case trimmed == "{" || trimmed == "}" || trimmed == "[" || trimmed == "]":
-			out = append(out, line)
-			continue
-		}
-
-		key, _, ok := parseSchemaLine(trimmed)
-		if !ok {
-			out = append(out, line)
-			continue
-		}
-
-		if key == "$schema" {
-			continue
-		}
-
-		switch {
-		case scope == "":
-			if key == "data" || key == "meta" {
-				scope = key
-				scopeIndent = indent
-			}
-			out = append(out, line)
-		case scope == "meta":
-			if metaFieldsKept[key] {
-				out = append(out, line)
-			}
-		case scope == "data":
-			if fieldDescriptionsKept[key] {
-				out = append(out, line)
+		if isSchemaClose(trimmed) {
+			if len(stack) > 0 {
+				kept := stack[len(stack)-1].keep
+				stack = stack[:len(stack)-1]
+				if kept {
+					out = append(out, line)
+				}
 			} else {
-				out = append(out, stripSchemaDescription(line))
+				out = append(out, line)
 			}
+			continue
+		}
+
+		key, _, isProperty := parseSchemaLine(trimmed)
+		opens := isSchemaOpen(trimmed)
+
+		keep := keepCurrent()
+		if isProperty {
+			switch currentKey() {
+			case "meta":
+				// Direct children of meta only; nested values under a dropped
+				// field stay dropped because the parent frame's keep is false.
+				keep = keep && metaFieldsKept[key]
+			case "":
+				if key == "$schema" {
+					keep = false
+				}
+			}
+		}
+
+		if opens {
+			fk := key
+			if !isProperty {
+				fk = currentKey()
+			}
+			stack = append(stack, frame{key: fk, keep: keep})
+		}
+
+		if !keep {
+			continue
+		}
+		if isProperty && !fieldDescriptionsKept[key] {
+			out = append(out, truncateSchemaDescription(line))
+		} else {
+			out = append(out, line)
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+func isSchemaOpen(trimmed string) bool {
+	return strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "[")
+}
+
+func isSchemaClose(trimmed string) bool {
+	return trimmed == "}" || trimmed == "]" || trimmed == "},"
 }
 
 // parseSchemaLine splits "key*: (type) desc" into its key, value and whether
@@ -178,33 +212,55 @@ func parseSchemaLine(trimmed string) (key, value string, ok bool) {
 	return key, trimmed[colon+2:], true
 }
 
-// stripSchemaDescription drops the trailing doc comment from a schema line
-// while keeping the key, required marker and type.
-func stripSchemaDescription(line string) string {
+// truncateSchemaDescription keeps the key, required marker, type and the first
+// sentence of the doc comment. Units and precision usually live in that first
+// sentence ("Decimal-adjusted transfer amount as a string"), while the rest is
+// usually rationale.
+func truncateSchemaDescription(line string) string {
 	trimmed := strings.TrimSpace(line)
 	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 	colon := strings.Index(trimmed, ": ")
 	if colon <= 0 {
 		return line
 	}
+	prefix := trimmed[:colon+2]
 	rest := trimmed[colon+2:]
-	// Type annotations from renderSchema are parenthesised. Anything after the
-	// matching closing paren is prose.
-	if strings.HasPrefix(rest, "(") {
-		depth := 0
-		for i, r := range rest {
-			switch r {
-			case '(':
-				depth++
-			case ')':
-				depth--
-				if depth == 0 {
-					return indent + trimmed[:colon+2] + rest[:i+1]
-				}
+	if !strings.HasPrefix(rest, "(") {
+		return line
+	}
+
+	// Find the end of the parenthesised type annotation; prose follows it.
+	depth := 0
+	typeEnd := -1
+	for i, r := range rest {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				typeEnd = i + 1
 			}
 		}
+		if typeEnd >= 0 {
+			break
+		}
 	}
-	return line
+	if typeEnd < 0 {
+		return line
+	}
+
+	doc := strings.TrimSpace(rest[typeEnd:])
+	if doc == "" {
+		return indent + prefix + rest[:typeEnd]
+	}
+	if idx := strings.Index(doc, ". "); idx > 0 {
+		doc = doc[:idx+1]
+	}
+	if len(doc) > 160 {
+		doc = strings.TrimRight(doc[:160], " ") + "…"
+	}
+	return indent + prefix + rest[:typeEnd] + " " + doc
 }
 
 func appendTo(mode int, line string, above, below *[]string) {
@@ -214,18 +270,6 @@ func appendTo(mode int, line string, above, below *[]string) {
 	case 2:
 		*below = append(*below, line)
 	}
-}
-
-// stripSchemaBlocks removes auto-generated sections from an operation's
-// long description that duplicate information Cobra already renders.
-// It keeps the response sections in place; use splitHelpBlocks when the
-// caller can render the result below Usage/Flags.
-func stripSchemaBlocks(long string) string {
-	above, below := splitHelpBlocks(long)
-	if below == "" {
-		return above
-	}
-	return strings.TrimRight(above+"\n\n"+below, "\n")
 }
 
 // isDroppedSchemaHeading reports whether a `## …` heading introduces one
@@ -244,12 +288,27 @@ func isDroppedSchemaHeading(line string) bool {
 }
 
 // isBelowSchemaHeading reports whether a `## …` heading should be rendered
-// after Usage/Flags. Only success responses move: the error envelope is small
-// and better kept next to the prose that explains how to call the command.
+// after Usage/Flags. Only 2xx responses move: error responses carry recovery
+// guidance and stay next to the prose that explains how to call the command.
 func isBelowSchemaHeading(line string) bool {
 	h := strings.TrimSpace(strings.TrimPrefix(line, "## "))
-	if strings.HasPrefix(h, "Response default") || strings.HasPrefix(h, "Responses default") {
+	var codes string
+	switch {
+	case strings.HasPrefix(h, "Responses "):
+		codes = strings.TrimPrefix(h, "Responses ")
+	case strings.HasPrefix(h, "Response "):
+		codes = strings.TrimPrefix(h, "Response ")
+	default:
 		return false
 	}
-	return strings.HasPrefix(h, "Response ") || strings.HasPrefix(h, "Responses ")
+	if i := strings.Index(codes, " "); i >= 0 {
+		codes = codes[:i]
+	}
+	for _, code := range strings.Split(codes, "/") {
+		n, err := strconv.Atoi(code)
+		if err != nil || n < 200 || n >= 300 {
+			return false
+		}
+	}
+	return true
 }

@@ -17,6 +17,7 @@ func TestExtractUnknownFlagName(t *testing.T) {
 		{"unknown flag: --time-range", "time-range"},
 		{"unknown flag: --q extra\n", "q"},
 		{"unknown shorthand flag: z in -z", "z"},
+		{"unknown shorthand flag: 'l' in -l", "l"},
 		{"some other error", ""},
 	}
 	for _, c := range cases {
@@ -33,8 +34,9 @@ func TestLevenshtein(t *testing.T) {
 	assert.Equal(t, 5, levenshtein("hello", ""))
 }
 
-// TestSuggestFlagNames covers the agent-confusion cases we care about:
-// --query → --q, --username → --handle, --timerange → --time-range.
+// TestSuggestFlagNames covers the agent-confusion cases we care about, and the
+// false positives we must not emit: a short guess should get no hint rather
+// than a list of unrelated flags.
 func TestSuggestFlagNames(t *testing.T) {
 	op := Operation{
 		Name:        "fake",
@@ -49,20 +51,25 @@ func TestSuggestFlagNames(t *testing.T) {
 	}
 	cmd := op.Command()
 
-	// "query" should suggest "q" (substring match).
+	// "query" should suggest the operation's own "q" first, not the global
+	// --quiet that happens to be closer by edit distance.
 	got := suggestFlagNames(cmd, "query")
-	assert.Contains(t, got, "q", "got=%v", got)
+	assert.NotEmpty(t, got, "got=%v", got)
+	assert.Equal(t, "q", got[0], "got=%v", got)
 
-	// "username" should suggest "handle" within edit distance 3? Actually
-	// levenshtein("username", "handle") is 6, so it won't match by distance.
-	// This confirms we need alias work for that case — test captures the
-	// current behaviour to prevent accidental regression.
-	_ = suggestFlagNames(cmd, "username")
-
-	// "timerange" (no dash) should map to "time-range" via substring or
-	// distance (levenshtein=1).
+	// "timerange" (no dash) maps to "time-range".
 	got = suggestFlagNames(cmd, "timerange")
 	assert.Contains(t, got, "time-range", "got=%v", got)
+
+	// Short guesses are too ambiguous to suggest anything.
+	for _, bad := range []string{"foo", "ab", "username"} {
+		assert.Empty(t, suggestFlagNames(cmd, bad), "bad=%q", bad)
+	}
+
+	// A misspelled shorthand resolves to the flag it abbreviates.
+	got = suggestFlagNames(cmd, "l")
+	assert.Equal(t, "limit", got[0], "got=%v", got)
+	assert.Empty(t, suggestFlagNames(cmd, "z"), "no flag starts with z")
 }
 
 func TestFlagErrorFuncWithSuggestions_UnknownFlag(t *testing.T) {

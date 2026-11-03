@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -163,5 +166,106 @@ func TestShellCompletionProtocol(t *testing.T) {
 	}
 	if !strings.Contains(stdout, ":") {
 		t.Errorf("__complete should end with a directive line, got:\n%s", stdout)
+	}
+}
+
+// expireSurfCache moves the cached spec's TTL into the past.
+func expireSurfCache(t *testing.T, home string) {
+	t.Helper()
+	path := filepath.Join(home, ".surf", "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cache config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse cache config: %v", err)
+	}
+	cfg["surf.expires"] = "2020-01-01T00:00:00Z"
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode cache config: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write cache config: %v", err)
+	}
+}
+
+// TestCompletionUsesExpiredCache covers the day-after case: completion must not
+// hit the network, but it also must not go silent just because the cached spec
+// is older than its TTL.
+func TestCompletionUsesExpiredCache(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "newThing", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+	expireSurfCache(t, home)
+
+	stdout, stderr, err := runCapture(t, bin, home, "__complete", "")
+	if err != nil {
+		t.Fatalf("__complete failed: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "new-thing") {
+		t.Errorf("completion should offer API commands from an expired cache, got:\n%s", stdout)
+	}
+}
+
+// TestCompletionProtocolSkipsTelemetry guards the prompt: a telemetry POST on
+// every Tab would stall completion on a slow network.
+func TestCompletionProtocolSkipsTelemetry(t *testing.T) {
+	old := os.Args
+	t.Cleanup(func() { os.Args = old })
+
+	for _, argv := range [][]string{
+		{"surf", "__complete", "x"},
+		{"surf", "__completeNoDesc", "x"},
+	} {
+		os.Args = argv
+		if !isCompletionProtocol() {
+			t.Errorf("%v should be treated as a completion request", argv)
+		}
+	}
+
+	os.Args = []string{"surf", "market-price", "--symbol", "BTC"}
+	if isCompletionProtocol() {
+		t.Error("a normal command must still report telemetry")
+	}
+}
+
+// TestCompletionHelpGoesToStderr keeps help consistent with every other
+// command; only generated scripts and the __complete protocol own stdout.
+func TestCompletionHelpGoesToStderr(t *testing.T) {
+	bin := buildBareSurfBin(t)
+
+	stdout, stderr, err := runCapture(t, bin, t.TempDir(), "completion", "bash", "--help")
+	if err != nil {
+		t.Fatalf("completion bash --help failed: %v", err)
+	}
+	if stdout != "" {
+		t.Errorf("completion help should not write to stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "Generate the autocompletion script") {
+		t.Errorf("completion help missing from stderr:\n%s", stderr)
+	}
+}
+
+// TestCompactImpliesJSON matches the flag's documented behaviour: an agent
+// that passes --compact should not have to discover --json too.
+func TestCompactImpliesJSON(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "newThing", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	stdout, stderr, err := runCapture(t, bin, home, "list-operations", "--compact")
+	if err != nil {
+		t.Fatalf("--compact failed: %v\n%s", err, stderr)
+	}
+	var ops []map[string]any
+	if jerr := json.Unmarshal([]byte(stdout), &ops); jerr != nil {
+		t.Fatalf("--compact should emit JSON: %v\n%s", jerr, stdout)
+	}
+	if len(ops) != 1 || ops[0]["name"] != "new-thing" {
+		t.Errorf("unexpected catalog: %s", stdout)
 	}
 }

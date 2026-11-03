@@ -321,6 +321,14 @@ func openapiOperation(cmd *cobra.Command, method string, uriTemplate *url.URL, p
 					log.Fatal(err)
 				}
 				example = newExample
+			} else if len(s.Examples) > 0 {
+				// OpenAPI 3.1 uses the plural form; the Surf spec only has
+				// `examples`, so without this fallback no flag ever shows one.
+				newExample, err := decodeYAML(s.Examples[0])
+				if err != nil {
+					log.Fatal(err)
+				}
+				example = newExample
 			}
 		}
 
@@ -345,6 +353,7 @@ func openapiOperation(cmd *cobra.Command, method string, uriTemplate *url.URL, p
 		description = strings.ReplaceAll(description, "`", "")
 
 		var enums []string
+		var minimum, maximum *float64
 		if schema != nil {
 			if len(schema.Enum) > 0 {
 				enums = make([]string, 0, len(schema.Enum))
@@ -352,6 +361,7 @@ func openapiOperation(cmd *cobra.Command, method string, uriTemplate *url.URL, p
 					enums = append(enums, e.Value)
 				}
 			}
+			minimum, maximum = schema.Minimum, schema.Maximum
 			// Append enum values and min/max constraints to the flag
 			// description so they appear in --help output.
 			description = appendSchemaHints(description, schema)
@@ -367,8 +377,8 @@ func openapiOperation(cmd *cobra.Command, method string, uriTemplate *url.URL, p
 			Default:     def,
 			Example:     example,
 			Enum:        enums,
-			Minimum:     schema.Minimum,
-			Maximum:     schema.Maximum,
+			Minimum:     minimum,
+			Maximum:     maximum,
 		}
 
 		if p.Explode != nil {

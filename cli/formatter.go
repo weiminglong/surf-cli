@@ -591,9 +591,9 @@ func (f *DefaultFormatter) formatAuto(format string, resp Response) ([]byte, err
 
 // emptyResultHint returns a one-paragraph note for a successful response whose
 // data is empty, or "" when the response should be rendered normally. Only
-// human-readable formats get the hint: JSON/YAML/table consumers parse the
-// structure and must keep receiving it unchanged.
-func emptyResultHint(resp Response, outFormat, filter string) string {
+// human-facing output gets the hint: a piped or JSON consumer parses the body
+// and must keep receiving it unchanged.
+func emptyResultHint(resp Response, outFormat string, tty bool, filter string) string {
 	if filter != "" || resp.Status < 200 || resp.Status >= 300 {
 		return ""
 	}
@@ -607,6 +607,10 @@ func emptyResultHint(resp Response, outFormat, filter string) string {
 	}
 	empty := false
 	switch d := data.(type) {
+	case nil:
+		// A nil slice serialises to null, which is how several Go services
+		// spell "no rows".
+		empty = true
 	case []any:
 		empty = len(d) == 0
 	case map[string]any:
@@ -616,9 +620,12 @@ func emptyResultHint(resp Response, outFormat, filter string) string {
 		return ""
 	}
 
-	// Only the human-facing default and explicit readable ask for this hint.
-	// JSON, table, gron and --filter consumers parse the body and must keep
-	// receiving exactly what the API returned.
+	// "auto" means readable only when attached to a terminal; when piped it
+	// resolves to JSON later in Format, and replacing that JSON with prose
+	// would break every `surf ... | jq` pipeline on an empty result.
+	if outFormat == "auto" && !tty {
+		return ""
+	}
 	if outFormat != "auto" && outFormat != "readable" {
 		return ""
 	}
@@ -647,7 +654,7 @@ func (f *DefaultFormatter) Format(resp Response) error {
 	// Empty result: say so instead of printing a bare `data: []` that reads the
 	// same as a malformed call. The hint points at the discovery tooling
 	// rather than guessing whether the parameters were wrong.
-	if hint := emptyResultHint(resp, outFormat, filter); hint != "" {
+	if hint := emptyResultHint(resp, outFormat, f.tty, filter); hint != "" {
 		encoded := []byte(hint)
 		if f.color {
 			if colored, err := Highlight("md", encoded); err == nil {

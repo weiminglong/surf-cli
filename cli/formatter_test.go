@@ -485,12 +485,42 @@ func TestEmptyResultHintSkipsNonEmptyAndErrorResponses(t *testing.T) {
 
 	nonEmpty := emptyEnvelope()
 	nonEmpty.Body.(map[string]any)["data"] = []any{map[string]any{"id": "x"}}
-	assert.Empty(t, emptyResultHint(nonEmpty, "readable", ""))
+	assert.Empty(t, emptyResultHint(nonEmpty, "readable", true, ""))
 
 	errorResp := emptyEnvelope()
 	errorResp.Status = 400
-	assert.Empty(t, emptyResultHint(errorResp, "readable", ""))
+	assert.Empty(t, emptyResultHint(errorResp, "readable", true, ""))
 
 	filtered := emptyEnvelope()
-	assert.Empty(t, emptyResultHint(filtered, "json", "body.data"))
+	assert.Empty(t, emptyResultHint(filtered, "json", true, "body.data"))
+}
+
+// TestEmptyResultHintPipedAutoKeepsJSON guards the non-TTY case: when output
+// is piped, "auto" resolves to JSON and replacing it with prose would break
+// `surf ... | jq` exactly when the result happens to be empty.
+func TestEmptyResultHintPipedAutoKeepsJSON(t *testing.T) {
+	assert.Empty(t, emptyResultHint(emptyEnvelope(), "auto", false, ""),
+		"piped auto output must stay parseable JSON")
+
+	formatter := NewDefaultFormatter(false, false) // non-TTY
+	buf := &bytes.Buffer{}
+	Stdout = buf
+
+	reset(false)
+	viper.Set("rsh-output-format", "auto")
+	viper.Set("rsh-filter", "")
+
+	assert.NoError(t, formatter.Format(emptyEnvelope()))
+	out := buf.String()
+	assert.NotContains(t, out, "(no data)")
+	assert.Contains(t, out, `"data"`, "piped empty result should still be JSON")
+}
+
+// TestEmptyResultHintHandlesNullData covers services that serialise a nil
+// slice as null rather than [].
+func TestEmptyResultHintHandlesNullData(t *testing.T) {
+	resp := emptyEnvelope()
+	resp.Body.(map[string]any)["data"] = nil
+	assert.NotEmpty(t, emptyResultHint(resp, "readable", true, ""))
+	assert.Empty(t, emptyResultHint(resp, "auto", false, ""))
 }

@@ -213,10 +213,9 @@ func (o Operation) Command() *cobra.Command {
 
 // flagErrorFuncWithSuggestions intercepts pflag parse errors and, for unknown
 // flags, appends a "did you mean?" hint with the closest valid flags on the
-// same command. Common agent guesses like --query (→ --q), --username (→
-// --handle), --time-range (on an interval-only endpoint) will match their
-// intended flag via edit distance, so the agent sees the right answer without
-// having to rerun --help.
+// same command. Matches are deliberately conservative: a wrong suggestion
+// costs an agent a wasted call, so short guesses like --foo get no hint at
+// all rather than a list of unrelated flags.
 func flagErrorFuncWithSuggestions(cmd *cobra.Command, err error) error {
 	msg := err.Error()
 	if !strings.HasPrefix(msg, "unknown flag:") && !strings.HasPrefix(msg, "unknown shorthand flag:") {
@@ -248,43 +247,84 @@ func extractUnknownFlagName(msg string) string {
 			if i := strings.IndexAny(rest, " \t\n"); i >= 0 {
 				rest = rest[:i]
 			}
-			return strings.TrimSpace(rest)
+			// pflag quotes shorthand names: `unknown shorthand flag: 'l' in -l`.
+			return strings.Trim(strings.TrimSpace(rest), "'\"`")
 		}
 	}
 	return ""
 }
 
-// suggestFlagNames returns up to 3 valid flag names from cmd whose Levenshtein
-// distance to bad is ≤ 3. Shorter valid names get priority on ties so that a
-// 1-char guess like --query doesn't miss --q.
+// suggestFlagNames returns up to three flags worth suggesting for an unknown
+// flag name. Flags defined on the command itself outrank inherited globals,
+// and exact prefix relationships outrank edit-distance matches, so --query
+// resolves to the operation's --q rather than the global --quiet.
 func suggestFlagNames(cmd *cobra.Command, bad string) []string {
+	bad = strings.ToLower(strings.TrimSpace(bad))
+	if bad == "" {
+		return nil
+	}
+
+	local := map[string]bool{}
+	cmd.LocalNonPersistentFlags().VisitAll(func(f *pflag.Flag) {
+		local[f.Name] = true
+	})
+
+	const (
+		matchNameStartsWithBad = iota // -l → limit
+		matchBadStartsWithName        // query → q
+		matchDistance
+	)
+
 	type candidate struct {
-		name string
-		dist int
+		name  string
+		kind  int
+		local bool
+		dist  int
 	}
 	var cands []candidate
+
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		if f.Hidden {
 			return
 		}
-		d := levenshtein(bad, f.Name)
-		// Allow up to 3 edits, OR if the bad name contains the real flag name
-		// as a substring (covers --query → --q, --keyword → --q harder but
-		// at least --timerange → --time-range).
-		if d <= 3 || strings.Contains(bad, f.Name) || strings.Contains(f.Name, bad) {
-			cands = append(cands, candidate{f.Name, d})
+		name := strings.ToLower(f.Name)
+		d := levenshtein(bad, name)
+		minLen := len(bad)
+		if len(name) < minLen {
+			minLen = len(name)
+		}
+
+		kind := -1
+		switch {
+		case strings.HasPrefix(name, bad) && (len(bad) <= 2 || len(name)-len(bad) <= 2):
+			kind = matchNameStartsWithBad
+		case strings.HasPrefix(bad, name) && (len(name) >= 2 || local[f.Name]):
+			kind = matchBadStartsWithName
+		case d <= 2 && minLen >= 3:
+			kind = matchDistance
+		case d <= 3 && minLen >= 6:
+			kind = matchDistance
+		}
+		if kind >= 0 {
+			cands = append(cands, candidate{f.Name, kind, local[f.Name], d})
 		}
 	})
-	// Sort by distance asc, then by length asc (so short names like "q" win
-	// ties against longer partial matches), then alphabetically.
+
 	sort.Slice(cands, func(i, j int) bool {
-		if cands[i].dist != cands[j].dist {
-			return cands[i].dist < cands[j].dist
+		a, b := cands[i], cands[j]
+		if a.local != b.local {
+			return a.local
 		}
-		if len(cands[i].name) != len(cands[j].name) {
-			return len(cands[i].name) < len(cands[j].name)
+		if a.kind != b.kind {
+			return a.kind < b.kind
 		}
-		return cands[i].name < cands[j].name
+		if a.dist != b.dist {
+			return a.dist < b.dist
+		}
+		if len(a.name) != len(b.name) {
+			return len(a.name) < len(b.name)
+		}
+		return a.name < b.name
 	})
 	if len(cands) > 3 {
 		cands = cands[:3]
@@ -296,8 +336,6 @@ func suggestFlagNames(cmd *cobra.Command, bad string) []string {
 	return out
 }
 
-// levenshtein computes the edit distance between a and b. Classic DP; fine
-// for short flag-name inputs.
 func levenshtein(a, b string) int {
 	if a == b {
 		return 0

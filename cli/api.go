@@ -139,12 +139,26 @@ func apiCacheMatchesBase(name string) bool {
 // Unlike Load, this skips the version check since it is used only to
 // populate command names and descriptions for help output.
 func LoadCachedAPI(name string) *API {
+	return loadCachedAPI(name, false)
+}
+
+// LoadCachedAPIAllowStale is LoadCachedAPI without the TTL check. Shell
+// completion runs on every Tab and must not touch the network, so it is better
+// to complete from an expired spec than to offer no commands until the user
+// happens to run a real one.
+func LoadCachedAPIAllowStale(name string) *API {
+	return loadCachedAPI(name, true)
+}
+
+func loadCachedAPI(name string, allowStale bool) *API {
 	if !apiCacheMatchesBase(name) {
 		return nil
 	}
-	expires := Cache.GetTime(name + ".expires")
-	if expires.IsZero() || !time.Now().Before(expires) {
-		return nil
+	if !allowStale {
+		expires := Cache.GetTime(name + ".expires")
+		if expires.IsZero() || !time.Now().Before(expires) {
+			return nil
+		}
 	}
 	filename := filepath.Join(getCacheDir(), name+".cbor")
 	data, err := os.ReadFile(filename)

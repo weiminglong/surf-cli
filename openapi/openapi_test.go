@@ -14,6 +14,7 @@ import (
 	"testing"
 	"testing/iotest"
 
+	"github.com/pb33f/libopenapi/datamodel/high/base"
 	v3 "github.com/pb33f/libopenapi/datamodel/high/v3"
 	"github.com/pb33f/libopenapi/orderedmap"
 	"github.com/stretchr/testify/assert"
@@ -243,4 +244,48 @@ func TestLoader(t *testing.T) {
 			assert.Equal(t, output, api)
 		})
 	}
+}
+
+// TestOpenAPIOperationParameterWithoutSchema covers parameters declared with
+// `content` instead of `schema`. The spec allows it, and a nil schema used to
+// panic while building the catalog and min/max bounds.
+func TestOpenAPIOperationParameterWithoutSchema(t *testing.T) {
+	uri, _ := url.Parse("https://example.com/things")
+	op := &v3.Operation{
+		OperationId: "contentOnly",
+		Parameters: []*v3.Parameter{
+			{Name: "filter", In: "query"},
+		},
+		Responses: &v3.Responses{Codes: orderedmap.New[string, *v3.Response]()},
+	}
+
+	require.NotPanics(t, func() {
+		got := openapiOperation(nil, http.MethodGet, uri, &v3.PathItem{}, op)
+		require.Len(t, got.QueryParams, 1)
+		assert.Nil(t, got.QueryParams[0].Minimum)
+		assert.Nil(t, got.QueryParams[0].Maximum)
+	})
+}
+
+// TestOpenAPIParameterUsesPluralExamples covers OpenAPI 3.1 specs, which use
+// `examples`; the Surf spec has 400+ such parameters and no singular ones.
+func TestOpenAPIParameterUsesPluralExamples(t *testing.T) {
+	schema := base.CreateSchemaProxy(&base.Schema{
+		Type: []string{"string"},
+		Examples: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "ethereum"},
+		},
+	})
+	uri, _ := url.Parse("https://example.com/things")
+	op := &v3.Operation{
+		OperationId: "pluralExamples",
+		Parameters: []*v3.Parameter{
+			{Name: "chain", In: "query", Schema: schema},
+		},
+		Responses: &v3.Responses{Codes: orderedmap.New[string, *v3.Response]()},
+	}
+
+	got := openapiOperation(nil, http.MethodGet, uri, &v3.PathItem{}, op)
+	require.Len(t, got.QueryParams, 1)
+	assert.Equal(t, "ethereum", got.QueryParams[0].Example)
 }

@@ -233,7 +233,14 @@ func main() {
 	// Deprecated operations are included so their help still resolves —
 	// Cobra's IsAvailableCommand already keeps them out of listings and
 	// completions.
-	if api := cli.LoadCachedAPI("surf"); api != nil {
+	// Shell completion must never wait on the network, so it reads the cached
+	// spec even after its TTL; otherwise the first Tab of the day returns no
+	// commands at all.
+	loadForCommands := cli.LoadCachedAPI
+	if isCompletionProtocol() {
+		loadForCommands = cli.LoadCachedAPIAllowStale
+	}
+	if api := loadForCommands("surf"); api != nil {
 		for _, op := range api.Operations {
 			if op.Hidden {
 				continue
@@ -275,8 +282,23 @@ func main() {
 		exitCode = cli.GetExitCode()
 	}
 
-	cli.ReportCLIEvent(cli.GetCurrentCommand(), exitCode, errMsg)
+	// Shell completion runs on every Tab and its output is consumed by the
+	// shell, so it must not post telemetry: a slow request would stall the
+	// prompt and the event stream would fill with __complete noise.
+	if !isCompletionProtocol() {
+		cli.ReportCLIEvent(cli.GetCurrentCommand(), exitCode, errMsg)
+	}
 	os.Exit(exitCode)
+}
+
+// isCompletionProtocol reports whether this invocation is one of Cobra's
+// hidden shell-completion requests rather than a command the user ran.
+func isCompletionProtocol() bool {
+	switch firstCommandArg(os.Args) {
+	case "__complete", "__completeNoDesc":
+		return true
+	}
+	return false
 }
 
 // localCommands are handled by this binary instead of being routed through the
@@ -327,6 +349,13 @@ func shouldInjectAPIName() bool {
 // a shell consumes from the hidden __complete command. Everything else keeps
 // Root's stderr writer so API JSON owns stdout.
 func completionWritesStdout() bool {
+	// --help is a normal help request and belongs on stderr like every other
+	// command's help.
+	for _, arg := range os.Args[1:] {
+		if arg == "--help" || arg == "-h" {
+			return false
+		}
+	}
 	switch firstCommandArg(os.Args) {
 	case "__complete", "__completeNoDesc":
 		return true
@@ -602,11 +631,11 @@ func newListOperationsCmd() *cobra.Command {
 
 			ops := filterOps(api.Operations, category)
 
+			if compact {
+				asJSON = true
+			}
 			if asJSON {
 				return printOperationsJSON(ops, compact)
-			}
-			if compact {
-				return fmt.Errorf("--compact only applies with --json")
 			}
 
 			if groupByTag {
@@ -642,14 +671,26 @@ type flagCatalog struct {
 
 // opCatalog is the agent-facing shape of one API operation.
 type opCatalog struct {
-	Name          string        `json:"name"`
-	Method        string        `json:"method"`
-	Group         string        `json:"group,omitempty"`
-	Short         string        `json:"short,omitempty"`
-	PathFlags     []flagCatalog `json:"path_flags,omitempty"`
-	RequiredFlags []flagCatalog `json:"required_flags,omitempty"`
-	OptionalFlags []flagCatalog `json:"optional_flags,omitempty"`
-	BodyRequired  bool          `json:"body_required,omitempty"`
+	Name           string          `json:"name"`
+	Method         string          `json:"method"`
+	Group          string          `json:"group,omitempty"`
+	Short          string          `json:"short,omitempty"`
+	PositionalArgs []positionalArg `json:"positional_args,omitempty"`
+	RequiredFlags  []flagCatalog   `json:"required_flags,omitempty"`
+	OptionalFlags  []flagCatalog   `json:"optional_flags,omitempty"`
+	HasBody        bool            `json:"has_body,omitempty"`
+}
+
+// positionalArg is a path parameter. It is passed positionally
+// (`surf onchain-sql-job-get <job-id>`), not as a flag, so it must not be
+// listed among the flags an agent can pass.
+type positionalArg struct {
+	Name        string   `json:"name"`
+	Position    int      `json:"position"`
+	Type        string   `json:"type"`
+	Required    bool     `json:"required,omitempty"`
+	Enum        []string `json:"enum,omitempty"`
+	Description string   `json:"description,omitempty"`
 }
 
 // printOperationsJSON emits the command catalog as JSON to stdout. Includes
@@ -663,16 +704,23 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 			continue
 		}
 		c := opCatalog{
-			Name:         op.Name,
-			Method:       op.Method,
-			Group:        op.Group,
-			BodyRequired: op.BodyMediaType != "",
+			Name:    op.Name,
+			Method:  op.Method,
+			Group:   op.Group,
+			HasBody: op.BodyMediaType != "",
 		}
 		if !compact {
 			c.Short = op.Short
 		}
-		for _, p := range op.PathParams {
-			c.PathFlags = append(c.PathFlags, paramToCatalog(p, compact))
+		for i, p := range op.PathParams {
+			c.PositionalArgs = append(c.PositionalArgs, positionalArg{
+				Name:        p.Name,
+				Position:    i + 1,
+				Type:        p.Type,
+				Required:    p.Required,
+				Enum:        p.Enum,
+				Description: conditionalDescription(p.Description, compact),
+			})
 		}
 		for _, p := range op.QueryParams {
 			fc := paramToCatalog(p, compact)
@@ -693,12 +741,22 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 		out = append(out, c)
 	}
 	enc := json.NewEncoder(catalogOut)
-	enc.SetIndent("", "  ")
+	if !compact {
+		enc.SetIndent("", "  ")
+	}
 	return enc.Encode(out)
 }
 
 // catalogOut lets tests capture the catalog without touching os.Stdout.
 var catalogOut io.Writer = os.Stdout
+
+// conditionalDescription drops flag documentation in compact mode.
+func conditionalDescription(desc string, compact bool) string {
+	if compact {
+		return ""
+	}
+	return desc
+}
 
 func paramToCatalog(p *cli.Param, compact bool) flagCatalog {
 	fc := flagCatalog{
@@ -711,9 +769,7 @@ func paramToCatalog(p *cli.Param, compact bool) flagCatalog {
 		Default:  p.Default,
 		Example:  p.Example,
 	}
-	if !compact {
-		fc.Description = p.Description
-	}
+	fc.Description = conditionalDescription(p.Description, compact)
 	return fc
 }
 

@@ -4,80 +4,152 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// TestHelpPutsFlagsBeforeResponseSchema is the integration counterpart to
-// TestSplitHelpBlocks: it asserts the ordering users and agents actually see
-// in the final --help output, not just the helper's return values.
-func TestHelpPutsFlagsBeforeResponseSchema(t *testing.T) {
-	bin := buildSurfBin(t)
-
-	tests := []struct {
-		op        string
-		wantFlag  string
-		wantAbove string // section that must stay above Usage for body-type commands
-	}{
-		{op: "news-feed", wantFlag: "--sort-by"},
-		{op: "market-price", wantFlag: "--symbol"},
-		{op: "onchain-sql", wantFlag: "--idempotency-key", wantAbove: "## Input Example"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.op, func(t *testing.T) {
-			out, err := runHelp(t, bin, tc.op)
-			if err != nil {
-				t.Skipf("%s not in the cached spec: %v", tc.op, err)
-			}
-
-			usage := strings.Index(out, "\nUsage:")
-			flags := strings.Index(out, "\nFlags:")
-			responses := strings.Index(out, "Format of the response:")
-			responseSchema := strings.Index(out, "## Response 200")
-
-			if usage < 0 || flags < 0 {
-				t.Fatalf("%s --help has no Usage/Flags section:\n%s", tc.op, out)
-			}
-			if responseSchema < 0 {
-				t.Fatalf("%s --help has no success-response block:\n%s", tc.op, out)
-			}
-
-			// Flags must come before the response schema, and the response
-			// block must come after the flags.
-			if flags > responseSchema {
-				t.Errorf("%s --help puts Flags after the response schema (flags@%d, response@%d)", tc.op, flags, responseSchema)
-			}
-			if responses < 0 || responses < flags {
-				t.Errorf("%s --help is missing the response block after Flags:\n%s", tc.op, out)
-			}
-
-			// The flag an agent needs must be visible before the schema dump.
-			flagPos := strings.Index(out, tc.wantFlag)
-			if flagPos < 0 {
-				t.Fatalf("%s --help is missing %s", tc.op, tc.wantFlag)
-			}
-			if flagPos > responses {
-				t.Errorf("%s: %s appears at %d, after the response block at %d", tc.op, tc.wantFlag, flagPos, responses)
-			}
-
-			if tc.wantAbove != "" {
-				above := strings.Index(out, tc.wantAbove)
-				if above < 0 || above > usage {
-					t.Errorf("%s: %q must stay above Usage (found at %d, usage at %d)", tc.op, tc.wantAbove, above, usage)
-				}
-			}
-		})
-	}
+// helpOrderSpecServer serves one operation with a body, a success response and
+// error responses, so the help layout can be asserted without depending on the
+// live spec (which CI machines do not have cached).
+func helpOrderSpecServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	spec := `{
+  "openapi": "3.0.0",
+  "info": {"title": "Surf Test API", "version": "1.0.0"},
+  "paths": {
+    "/gateway/v1/helpOrder": {
+      "post": {
+        "operationId": "helpOrder",
+        "summary": "Help order fixture",
+        "description": "Prose that belongs at the top.",
+        "tags": ["test"],
+        "parameters": [
+          {"name": "address", "in": "query", "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {"type": "object", "properties": {"sql": {"type": "string"}}},
+              "example": {"sql": "SELECT 1"}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {"type": "object", "properties": {"id": {"type": "string", "description": "Article ID"}}}
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "cached": {"type": "boolean", "description": "Served from cache"},
+                        "empty_reason": {"type": "string", "description": "Why empty"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Timed out",
+            "content": {
+              "application/json": {
+                "schema": {"type": "object", "properties": {"recommended_action": {"type": "string"}}}
+              }
+            }
+          },
+          "default": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {"type": "object", "properties": {"error": {"type": "object", "properties": {"code": {"type": "string"}}}}}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gateway/openapi.json" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, spec)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-func runHelp(t *testing.T, bin, op string) (string, error) {
-	t.Helper()
-	// Inherit the real HOME: the cached spec lives in ~/.surf and --help makes
-	// no network calls, so no request server is needed here.
-	out, err := exec.Command(bin, op, "--help").CombinedOutput()
-	return string(out), err
+// TestHelpPutsFlagsBeforeResponseSchema is the integration counterpart to
+// TestSplitHelpBlocks: it asserts the ordering users and agents actually see
+// in the final --help output, using a stub spec so it runs in CI too.
+func TestHelpPutsFlagsBeforeResponseSchema(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := helpOrderSpecServer(t)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	// Help is written to stderr so stdout stays parseable.
+	_, out, err := runCapture(t, bin, home, "help-order", "--help")
+	if err != nil {
+		t.Fatalf("--help failed: %v\n%s", err, out)
+	}
+
+	usage := strings.Index(out, "\nUsage:")
+	flags := strings.Index(out, "\nFlags:")
+	responseBlock := strings.Index(out, "Format of the response:")
+	response200 := strings.Index(out, "## Response 200")
+	response408 := strings.Index(out, "## Response 408")
+	responseDefault := strings.Index(out, "## Response default")
+	inputExample := strings.Index(out, "## Input Example")
+
+	if usage < 0 || flags < 0 {
+		t.Fatalf("--help has no Usage/Flags section:\n%s", out)
+	}
+	if response200 < 0 || responseBlock < 0 {
+		t.Fatalf("--help has no success-response block:\n%s", out)
+	}
+
+	// Flags come before the success schema, which comes after them.
+	if flags > response200 {
+		t.Errorf("Flags rendered after the response schema (flags@%d, response@%d):\n%s", flags, response200, out)
+	}
+	if responseBlock < flags {
+		t.Errorf("response block should follow Flags (block@%d, flags@%d):\n%s", responseBlock, flags, out)
+	}
+
+	// The flag needed to construct the call is visible before the schema.
+	if pos := strings.Index(out, "--address"); pos < 0 || pos > responseBlock {
+		t.Errorf("--address should appear before the response block (pos=%d, block=%d):\n%s", pos, responseBlock, out)
+	}
+
+	// Body-type input example stays above Usage.
+	if inputExample < 0 || inputExample > usage {
+		t.Errorf("## Input Example must stay above Usage (pos=%d, usage=%d):\n%s", inputExample, usage, out)
+	}
+
+	// Error responses stay above Usage with the prose that explains recovery.
+	for name, pos := range map[string]int{"default": responseDefault, "408": response408} {
+		if pos < 0 {
+			t.Errorf("## Response %s missing from --help:\n%s", name, out)
+			continue
+		}
+		if pos > usage {
+			t.Errorf("## Response %s should stay above Usage (pos=%d, usage=%d)", name, pos, usage)
+		}
+	}
 }
 
 // runSurfCapture runs surf with an isolated HOME and returns combined output

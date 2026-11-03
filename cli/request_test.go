@@ -183,25 +183,44 @@ func TestRequestRetryIn(t *testing.T) {
 	assert.Equal(t, resp.StatusCode, http.StatusOK)
 }
 
-func TestRequestRetryAfter(t *testing.T) {
+func TestRequestRetryAfterSeconds(t *testing.T) {
 	defer gock.Off()
 
 	reset(false)
-	viper.Set("rsh-retry", 2)
+	viper.Set("rsh-retry", 1)
 
-	// Seconds value
 	gock.New("http://example.com").
 		Put("/").
 		Times(1).
 		Reply(http.StatusTooManyRequests).
 		SetHeader("Retry-After", "0")
 
-	// HTTP date value
+	gock.New("http://example.com").
+		Put("/").
+		Times(1).
+		Reply(http.StatusOK)
+
+	req, _ := http.NewRequest(http.MethodPut, "http://example.com/", bytes.NewReader([]byte("hello")))
+	resp, err := MakeRequest(req)
+
+	assert.NoError(t, err)
+	assert.Equal(t, resp.StatusCode, http.StatusOK)
+}
+
+// TestRequestRetryAfterHTTPDate covers the http.ParseTime branch. The date is
+// built in UTC and one second out: formatting a local time as GMT (the old
+// fixture) produced a wait of hours outside UTC.
+func TestRequestRetryAfterHTTPDate(t *testing.T) {
+	defer gock.Off()
+
+	reset(false)
+	viper.Set("rsh-retry", 1)
+
 	gock.New("http://example.com").
 		Put("/").
 		Times(1).
 		Reply(http.StatusTooManyRequests).
-		SetHeader("Retry-After", "1")
+		SetHeader("Retry-After", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
 
 	gock.New("http://example.com").
 		Put("/").

@@ -38,6 +38,15 @@ func catalogFixture() []cli.Operation {
 				{Name: "q", Type: "string", Required: true, Description: "Query"},
 			},
 		},
+		{
+			Name:        "job-get",
+			Method:      "GET",
+			Short:       "Get a job",
+			URITemplate: "https://example.com/jobs/{job_id}",
+			PathParams: []*cli.Param{
+				{Name: "job_id", Type: "string", Required: true, Description: "Job identifier"},
+			},
+		},
 	}
 }
 
@@ -58,7 +67,7 @@ func decodeCatalog(t *testing.T, ops []cli.Operation, compact bool) []map[string
 
 func TestOperationsJSONIncludesEnumsAndBounds(t *testing.T) {
 	out := decodeCatalog(t, catalogFixture(), false)
-	require.Len(t, out, 2)
+	require.Len(t, out, 3)
 
 	sortBy := flagByName(t, out[0]["optional_flags"], "sort-by")
 	assert.Equal(t, []any{"recency", "trending"}, sortBy["enum"])
@@ -71,6 +80,24 @@ func TestOperationsJSONIncludesEnumsAndBounds(t *testing.T) {
 	required := out[1]["required_flags"].([]any)
 	require.Len(t, required, 1)
 	assert.Equal(t, "q", required[0].(map[string]any)["name"])
+}
+
+// TestOperationsJSONPathParamsArePositional guards against advertising path
+// parameters as flags: `surf job-get --job-id 1` does not exist.
+func TestOperationsJSONPathParamsArePositional(t *testing.T) {
+	out := decodeCatalog(t, catalogFixture(), false)
+	job := out[2]
+
+	assert.NotContains(t, job, "path_flags")
+
+	args, ok := job["positional_args"].([]any)
+	require.True(t, ok, "positional args should be listed separately: %v", job)
+	require.Len(t, args, 1)
+
+	arg := args[0].(map[string]any)
+	assert.Equal(t, "job_id", arg["name"])
+	assert.Equal(t, float64(1), arg["position"])
+	assert.Equal(t, true, arg["required"])
 }
 
 func TestOperationsJSONCompactDropsDescriptions(t *testing.T) {
@@ -105,7 +132,11 @@ func TestOperationsJSONCompactIsSmaller(t *testing.T) {
 	require.NoError(t, printOperationsJSON(catalogFixture(), true))
 
 	assert.Less(t, compact.Len(), full.Len())
-	assert.True(t, strings.Contains(compact.String(), `"enum"`))
+	assert.Contains(t, compact.String(), `"enum"`)
+	// Compact output is meant to be pasted into a prompt, so it carries no
+	// pretty-printing whitespace.
+	assert.NotContains(t, compact.String(), "\n  ")
+	assert.Equal(t, 1, strings.Count(compact.String(), "\n"))
 }
 
 func flagByName(t *testing.T, flags any, name string) map[string]any {

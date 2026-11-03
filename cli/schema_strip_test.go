@@ -184,7 +184,11 @@ func TestStripSchemaBlocks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := stripSchemaBlocks(tt.in)
+			above, below := splitHelpBlocks(tt.in)
+			got := above
+			if below != "" {
+				got = strings.TrimRight(above+"\n\n"+below, "\n")
+			}
 			if tt.wantOut != "" {
 				assert.Equal(t, tt.wantOut, got)
 			}
@@ -281,10 +285,9 @@ func TestSplitHelpBlocks(t *testing.T) {
 	assert.NotContains(t, below, "watermark:")
 	assert.NotContains(t, below, "$schema")
 
-	// Chaining hints survive; other field docs are stripped.
+	// Chaining hints and first-sentence docs survive; the long tail does not.
 	assert.Contains(t, below, "id*: (string) Article ID.")
-	assert.NotContains(t, below, "Article headline")
-	assert.Contains(t, below, "title*: (string)")
+	assert.Contains(t, below, "title*: (string) Article headline")
 }
 
 func TestSplitHelpBlocks_Empty(t *testing.T) {
@@ -297,6 +300,69 @@ func TestIsBelowSchemaHeading(t *testing.T) {
 	assert.True(t, isBelowSchemaHeading("## Response 200 (application/json)"))
 	assert.True(t, isBelowSchemaHeading("## Responses 200/201 (application/json)"))
 	assert.False(t, isBelowSchemaHeading("## Response default (application/json)"))
+	assert.False(t, isBelowSchemaHeading("## Response 408 (application/json)"),
+		"error responses keep their recovery guidance above the flags")
+	assert.False(t, isBelowSchemaHeading("## Response 429 (application/json)"))
+	assert.False(t, isBelowSchemaHeading("## Responses 200/409 (application/json)"),
+		"a merged heading with any non-2xx code stays above")
+	assert.True(t, isBelowSchemaHeading("## Responses 200/201 (application/json)"))
 	assert.False(t, isBelowSchemaHeading("## Input Example"))
 	assert.False(t, isBelowSchemaHeading("## Request Schema (application/json)"))
+}
+
+// TestCompactResponseSchemas_DropsNestedMetaSubtree verifies that dropping a
+// meta field also drops the block it opens, so its children and closing brace
+// do not leak into the parent scope.
+func TestCompactResponseSchemas_DropsNestedMetaSubtree(t *testing.T) {
+	block := strings.Join([]string{
+		"## Response 200 (application/json)",
+		"",
+		"```schema",
+		"{",
+		"  data*: [",
+		"    {",
+		"      id*: (string) Article ID",
+		"    }",
+		"  ]",
+		"  meta*: {",
+		"    pagination: {",
+		"      total: (integer) nested total",
+		"      limit: (integer) nested limit",
+		"    }",
+		"    total: (integer) Total matching items",
+		"    cached*: (boolean) Served from cache",
+		"  }",
+		"}",
+		"```",
+	}, "\n")
+
+	got := compactResponseSchemas(block)
+	assert.NotContains(t, got, "pagination")
+	assert.NotContains(t, got, "nested total")
+	assert.NotContains(t, got, "nested limit")
+	assert.Contains(t, got, "total: (integer) Total matching items")
+	assert.NotContains(t, got, "Served from cache")
+
+	// Braces must still balance after the subtree is removed.
+	assert.Equal(t, strings.Count(got, "{"), strings.Count(got, "}"), got)
+}
+
+// TestCompactResponseSchemas_KeepsFirstSentence verifies that units and other
+// semantics in a field's first sentence survive compaction.
+func TestCompactResponseSchemas_KeepsFirstSentence(t *testing.T) {
+	block := strings.Join([]string{
+		"```schema",
+		"{",
+		"  data*: [",
+		"    {",
+		"      amount*: (string) Decimal-adjusted transfer amount as a string. Raw base units live in amount_raw.",
+		"    }",
+		"  ]",
+		"}",
+		"```",
+	}, "\n")
+
+	got := compactResponseSchemas(block)
+	assert.Contains(t, got, "Decimal-adjusted transfer amount as a string.")
+	assert.NotContains(t, got, "Raw base units live in amount_raw")
 }
