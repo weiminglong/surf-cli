@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -740,15 +739,12 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 		}
 		out = append(out, c)
 	}
-	enc := json.NewEncoder(catalogOut)
+	enc := json.NewEncoder(cli.Stdout)
 	if !compact {
 		enc.SetIndent("", "  ")
 	}
 	return enc.Encode(out)
 }
-
-// catalogOut lets tests capture the catalog without touching os.Stdout.
-var catalogOut io.Writer = os.Stdout
 
 // conditionalDescription drops flag documentation in compact mode.
 func conditionalDescription(desc string, compact bool) string {

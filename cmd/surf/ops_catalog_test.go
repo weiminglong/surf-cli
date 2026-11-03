@@ -55,9 +55,9 @@ func fptr(f float64) *float64 { return &f }
 func decodeCatalog(t *testing.T, ops []cli.Operation, compact bool) []map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
-	old := catalogOut
-	catalogOut = &buf
-	t.Cleanup(func() { catalogOut = old })
+	old := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = old })
 
 	require.NoError(t, printOperationsJSON(ops, compact))
 	var out []map[string]any
@@ -123,12 +123,12 @@ func TestOperationsJSONCompactDropsDescriptions(t *testing.T) {
 
 func TestOperationsJSONCompactIsSmaller(t *testing.T) {
 	var full, compact bytes.Buffer
-	old := catalogOut
-	t.Cleanup(func() { catalogOut = old })
+	old := cli.Stdout
+	t.Cleanup(func() { cli.Stdout = old })
 
-	catalogOut = &full
+	cli.Stdout = &full
 	require.NoError(t, printOperationsJSON(catalogFixture(), false))
-	catalogOut = &compact
+	cli.Stdout = &compact
 	require.NoError(t, printOperationsJSON(catalogFixture(), true))
 
 	assert.Less(t, compact.Len(), full.Len())
