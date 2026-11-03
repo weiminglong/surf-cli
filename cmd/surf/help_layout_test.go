@@ -210,8 +210,8 @@ func TestEmptyResultHintIntegration(t *testing.T) {
 		if strings.Contains(out, "(no data)") {
 			t.Errorf("--json must not contain the readable hint:\n%s", out)
 		}
-		if !strings.Contains(errOut, "(no data)") {
-			t.Errorf("--json should explain the empty result on stderr:\n%s", errOut)
+		if strings.Contains(errOut, "(no data)") {
+			t.Errorf("--json should not add side-channel text to stderr:\n%s", errOut)
 		}
 	})
 

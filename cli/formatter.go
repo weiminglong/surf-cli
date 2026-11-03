@@ -666,25 +666,19 @@ func (f *DefaultFormatter) Format(resp Response) error {
 	outFormat := viper.GetString("rsh-output-format")
 	filter := viper.GetString("rsh-filter")
 
-	// Empty result: say so instead of printing a bare `data: []` that reads the
-	// same as a malformed call. On a terminal the note replaces the response;
-	// for piped or structured output it goes to stderr so stdout stays
-	// parseable while an agent still sees why the result is empty.
-	if note := emptyResultNote(resp, filter); note != "" {
-		human := outFormat == "readable" || (outFormat == "auto" && f.tty)
-		if human {
-			encoded := []byte(note)
-			if f.color {
-				if colored, err := Highlight("md", encoded); err == nil {
-					encoded = colored
-				}
+	// Empty result: on a terminal, say so instead of printing a bare
+	// `data: []` that reads the same as a malformed call. Piped and structured
+	// output is left untouched: agents get no extra signal from the CLI here,
+	// and the server-side meta.empty_reason is the intended channel.
+	if hint := emptyResultHint(resp, outFormat, f.tty, filter); hint != "" {
+		encoded := []byte(hint)
+		if f.color {
+			if colored, err := Highlight("md", encoded); err == nil {
+				encoded = colored
 			}
-			Stdout.Write(append(encoded, '\n'))
-			return nil
 		}
-		if !enableQuiet {
-			fmt.Fprintln(Stderr, note)
-		}
+		Stdout.Write(append(encoded, '\n'))
+		return nil
 	}
 
 	// Special case: raw response output mode. The response wasn't decoded so we

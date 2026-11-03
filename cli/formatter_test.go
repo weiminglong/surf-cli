@@ -479,7 +479,7 @@ func TestEmptyResultHintSkippedForStructuredFormats(t *testing.T) {
 			viper.Set("rsh-filter", "")
 
 			out, errOut := formatCaptured(t, formatter, emptyEnvelope())
-			assert.Contains(t, errOut, "(no data)", "structured output keeps stdout parseable; note goes to stderr")
+			assert.Empty(t, errOut, "structured output gets no side-channel text")
 			assert.NotContains(t, out, "(no data)")
 			assert.NotContains(t, out, "returned no rows")
 
@@ -551,7 +551,7 @@ func TestEmptyResultHintPipedAutoKeepsJSON(t *testing.T) {
 	stdout, stderr := formatCaptured(t, formatter, emptyEnvelope())
 	assert.NotContains(t, stdout, "(no data)")
 	assert.Contains(t, stdout, `"data"`, "piped empty result should still be JSON")
-	assert.Contains(t, stderr, "(no data)", "the note moves to stderr so agents still see it")
+	assert.Empty(t, stderr, "piped output gets no side-channel text")
 }
 
 // TestEmptyResultHintHandlesNullData covers services that serialise a nil
