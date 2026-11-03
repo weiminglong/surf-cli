@@ -589,12 +589,15 @@ func (f *DefaultFormatter) formatAuto(format string, resp Response) ([]byte, err
 	return encoded, nil
 }
 
-// emptyResultHint returns a one-paragraph note for a successful response whose
-// data is empty, or "" when the response should be rendered normally. Only
-// human-facing output gets the hint: a piped or JSON consumer parses the body
-// and must keep receiving it unchanged.
-func emptyResultHint(resp Response, outFormat string, tty bool, filter string) string {
+// emptyResultNote returns a paragraph explaining a successful response with
+// no rows, or "" when the response should be rendered normally.
+func emptyResultNote(resp Response, filter string) string {
 	if filter != "" || resp.Status < 200 || resp.Status >= 300 {
+		return ""
+	}
+	// Some endpoints report failures inside a 200 with data:null. That is an
+	// error, not an empty page, and the hint would hide its code and message.
+	if isErrorEnvelope(resp.Body) {
 		return ""
 	}
 	body, ok := resp.Body.(map[string]any)
@@ -619,15 +622,15 @@ func emptyResultHint(resp Response, outFormat string, tty bool, filter string) s
 	if !empty {
 		return ""
 	}
-
-	// "auto" means readable only when attached to a terminal; when piped it
-	// resolves to JSON later in Format, and replacing that JSON with prose
-	// would break every `surf ... | jq` pipeline on an empty result.
-	if outFormat == "auto" && !tty {
-		return ""
-	}
-	if outFormat != "auto" && outFormat != "readable" {
-		return ""
+	// An empty page can still have a next page (cursor paging). Replacing the
+	// response would hide has_more/next_cursor, so let it render.
+	if meta, ok := body["meta"].(map[string]any); ok {
+		if more, ok := meta["has_more"].(bool); ok && more {
+			return ""
+		}
+		if cursor, ok := meta["next_cursor"].(string); ok && cursor != "" {
+			return ""
+		}
 	}
 
 	var b strings.Builder
@@ -637,12 +640,24 @@ func emptyResultHint(resp Response, outFormat string, tty bool, filter string) s
 	b.WriteString("  - required parameters accepted but too narrow\n\n")
 	b.WriteString("Check the parameters with `--help`, or find the right endpoint with `list-operations`.\n")
 	b.WriteString("Use `--json` to print the raw JSON body.")
-	if hint, ok := body["meta"].(map[string]any); ok {
-		if reason, ok := hint["empty_reason"].(string); ok && reason != "" {
+	if meta, ok := body["meta"].(map[string]any); ok {
+		if reason, ok := meta["empty_reason"].(string); ok && reason != "" {
 			b.WriteString("\n\nempty_reason: " + reason)
 		}
 	}
 	return b.String()
+}
+
+// emptyResultHint reports whether the note should replace stdout. That is only
+// true for human-facing output; piped output stays parseable.
+func emptyResultHint(resp Response, outFormat string, tty bool, filter string) string {
+	if outFormat == "auto" && !tty {
+		return ""
+	}
+	if outFormat != "auto" && outFormat != "readable" {
+		return ""
+	}
+	return emptyResultNote(resp, filter)
 }
 
 // Format will filter, prettify, colorize and output the data.
@@ -652,17 +667,24 @@ func (f *DefaultFormatter) Format(resp Response) error {
 	filter := viper.GetString("rsh-filter")
 
 	// Empty result: say so instead of printing a bare `data: []` that reads the
-	// same as a malformed call. The hint points at the discovery tooling
-	// rather than guessing whether the parameters were wrong.
-	if hint := emptyResultHint(resp, outFormat, f.tty, filter); hint != "" {
-		encoded := []byte(hint)
-		if f.color {
-			if colored, err := Highlight("md", encoded); err == nil {
-				encoded = colored
+	// same as a malformed call. On a terminal the note replaces the response;
+	// for piped or structured output it goes to stderr so stdout stays
+	// parseable while an agent still sees why the result is empty.
+	if note := emptyResultNote(resp, filter); note != "" {
+		human := outFormat == "readable" || (outFormat == "auto" && f.tty)
+		if human {
+			encoded := []byte(note)
+			if f.color {
+				if colored, err := Highlight("md", encoded); err == nil {
+					encoded = colored
+				}
 			}
+			Stdout.Write(append(encoded, '\n'))
+			return nil
 		}
-		Stdout.Write(append(encoded, '\n'))
-		return nil
+		if !enableQuiet {
+			fmt.Fprintln(Stderr, note)
+		}
 	}
 
 	// Special case: raw response output mode. The response wasn't decoded so we

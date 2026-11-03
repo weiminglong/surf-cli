@@ -436,3 +436,67 @@ func TestIsSchemaOpenLine(t *testing.T) {
 		"a brace inside a description is prose, not structure")
 	assert.False(t, isSchemaOpenLine("total: (integer) 3"))
 }
+
+// TestCapDocLongKeepsParensBalanced covers a cut that lands inside a
+// parenthesis: extending to the close must not be undone by the word-boundary
+// backoff.
+func TestCapDocLongKeepsParensBalanced(t *testing.T) {
+	doc := strings.Repeat("word ", 30) + "(" + strings.Repeat("detail ", 40) + ")"
+	got := capDoc(doc, 160)
+	assert.Equal(t, strings.Count(got, "("), strings.Count(got, ")"), got)
+	assert.True(t, strings.HasSuffix(got, ")…"), got)
+}
+
+// TestCompactResponseSchemas_SingleLineArrays verifies that one-line values
+// such as [<any>] do not push a phantom block frame.
+func TestCompactResponseSchemas_SingleLineArrays(t *testing.T) {
+	block := strings.Join([]string{
+		"```schema",
+		"{",
+		"  data*: [",
+		"    {",
+		"      notes: [<any>]",
+		"      nested: [<recursive ref>]",
+		"    }",
+		"  ]",
+		"  meta*: {",
+		"    total: (integer) Total matching items",
+		"  }",
+		"}",
+		"```",
+	}, "\n")
+
+	got := compactResponseSchemas(block)
+	assert.Contains(t, got, "total: (integer) Total matching items")
+	assert.Equal(t, strings.Count(got, "{"), strings.Count(got, "}"), got)
+	assert.Equal(t, strings.Count(got, "["), strings.Count(got, "]"), got)
+}
+
+// TestCompactResponseSchemas_KeepsNestedMetaField verifies that only the
+// envelope's meta is pruned; a business field named meta inside data is data.
+func TestCompactResponseSchemas_KeepsNestedMetaField(t *testing.T) {
+	block := strings.Join([]string{
+		"```schema",
+		"{",
+		"  data*: [",
+		"    {",
+		"      meta*: {",
+		"        name: (string) Business name",
+		"        total: (integer) Business total",
+		"      }",
+		"    }",
+		"  ]",
+		"  meta*: {",
+		"    cached*: (boolean) Envelope cache flag",
+		"    total: (integer) Envelope total",
+		"  }",
+		"}",
+		"```",
+	}, "\n")
+
+	got := compactResponseSchemas(block)
+	assert.Contains(t, got, "Business name")
+	assert.Contains(t, got, "Business total")
+	assert.Contains(t, got, "Envelope total")
+	assert.NotContains(t, got, "Envelope cache flag")
+}

@@ -243,10 +243,10 @@ func appendSchemaHints(desc string, s *base.Schema) string {
 	if s.Minimum != nil || s.Maximum != nil {
 		var parts []string
 		if s.Minimum != nil {
-			parts = append(parts, "min "+strconv.FormatFloat(*s.Minimum, 'g', -1, 64))
+			parts = append(parts, "min "+strconv.FormatFloat(*s.Minimum, 'f', -1, 64))
 		}
 		if s.Maximum != nil {
-			parts = append(parts, "max "+strconv.FormatFloat(*s.Maximum, 'g', -1, 64))
+			parts = append(parts, "max "+strconv.FormatFloat(*s.Maximum, 'f', -1, 64))
 		}
 		desc = appendHint(desc, strings.Join(parts, ", "))
 	}

@@ -141,22 +141,28 @@ func apiCacheMatchesBase(name string) bool {
 // so a mismatch is treated as a miss and re-synced.
 const apiCacheVersion = 3
 
+// specHTTPClient bounds spec downloads.
+var specHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // LoadCachedAPI loads an API from the local cache without making network
 // requests. Returns nil if no valid cache exists or is expired.
 // Unlike Load, this skips the version check since it is used only to
 // populate command names and descriptions for help output.
 func LoadCachedAPI(name string) *API {
-	return loadCachedAPI(name, false)
+	return loadCachedAPI(name, false, false)
 }
 
 // LoadCachedAPIFallback returns a fresh cached API, falling back to an expired
 // one. Read-only local commands (help, catalog listings) prefer an old spec
 // over failing when the cache has aged out and the network is unavailable.
 func LoadCachedAPIFallback(name string) *API {
-	if api := loadCachedAPI(name, false); api != nil {
+	if api := loadCachedAPI(name, false, false); api != nil {
 		return api
 	}
-	return loadCachedAPI(name, true)
+	// Expired is acceptable; a cache from an older schema version is not,
+	// because its missing fields would be reported as absent rather than
+	// unknown.
+	return loadCachedAPI(name, true, false)
 }
 
 // LoadCachedAPIAllowStale is LoadCachedAPI without the TTL check. Shell
@@ -164,21 +170,21 @@ func LoadCachedAPIFallback(name string) *API {
 // to complete from an expired spec than to offer no commands until the user
 // happens to run a real one.
 func LoadCachedAPIAllowStale(name string) *API {
-	return loadCachedAPI(name, true)
+	return loadCachedAPI(name, true, true)
 }
 
-func loadCachedAPI(name string, allowStale bool) *API {
+func loadCachedAPI(name string, allowExpired, allowOldVersion bool) *API {
 	if !apiCacheMatchesBase(name) {
 		return nil
 	}
-	if !allowStale {
+	if !allowExpired {
 		expires := Cache.GetTime(name + ".expires")
 		if expires.IsZero() || !time.Now().Before(expires) {
 			return nil
 		}
-		if Cache.GetInt(name+".cache_version") != apiCacheVersion {
-			return nil
-		}
+	}
+	if !allowOldVersion && Cache.GetInt(name+".cache_version") != apiCacheVersion {
+		return nil
 	}
 	filename := filepath.Join(getCacheDir(), name+".cbor")
 	data, err := os.ReadFile(filename)
@@ -235,10 +241,13 @@ func Load(entrypoint string, root *cobra.Command) (API, error) {
 	fromFileOrUrl := func(uri string) ([]byte, error) {
 		uriLower := strings.ToLower(uri)
 		if strings.Index(uriLower, "http") == 0 {
-			resp, err := http.Get(uri)
+			// Bound the fetch: an unresponsive proxy or VPN used to block
+			// --help and list-operations indefinitely.
+			resp, err := specHTTPClient.Get(uri)
 			if err != nil {
 				return []byte{}, err
 			}
+			defer resp.Body.Close()
 			return io.ReadAll(resp.Body)
 		} else {
 			return os.ReadFile(os.ExpandEnv(uri))

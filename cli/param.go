@@ -149,14 +149,20 @@ func (p Param) helpDescription() string {
 }
 
 // HelpfulExample returns the example when it adds information beyond the
-// description and default, or nil when it would just repeat them. Used by the
-// JSON catalog so the agent-facing index stays lean.
+// description and default, or nil when it would just repeat them.
 func (p Param) HelpfulExample() any {
+	return p.HelpfulExampleFor(p.Description)
+}
+
+// HelpfulExampleFor judges redundancy against the description that will
+// actually be shown. Compact output drops descriptions, so an example that was
+// "already in the description" must reappear there.
+func (p Param) HelpfulExampleFor(desc string) any {
 	if p.Example == nil {
 		return nil
 	}
 	ex := fmt.Sprintf("%v", p.Example)
-	if ex == "" || p.exampleRedundant(p.Description, ex) {
+	if ex == "" || p.exampleRedundant(desc, ex) {
 		return nil
 	}
 	return p.Example
@@ -176,9 +182,24 @@ func (p Param) exampleRedundant(desc, example string) bool {
 	return p.Default != nil && fmt.Sprintf("%v", p.Default) == example
 }
 
+// SupportsFlag reports whether AddFlag can register this parameter type. The
+// catalog uses it so it never advertises a flag the command does not have.
+func (p Param) SupportsFlag() bool {
+	switch p.Type {
+	case "boolean", "integer", "number", "string",
+		"array[boolean]", "array[integer]", "array[string]":
+		return true
+	}
+	return false
+}
+
 // AddFlag adds a new option flag to a command's flag set for this parameter.
 func (p Param) AddFlag(flags *pflag.FlagSet) any {
 	name := p.OptionName()
+	if !p.SupportsFlag() {
+		log.Printf("unsupported flag type %q for param %s", p.Type, p.Name)
+		return nil
+	}
 	def := p.Default
 	desc := p.helpDescription()
 
@@ -237,9 +258,6 @@ func (p Param) AddFlag(flags *pflag.FlagSet) any {
 			def = typed
 		}
 		return flags.IntSlice(name, def.([]int), desc)
-	case "array[number]":
-		log.Printf("number slice not implemented for param %s", p.Name)
-		return nil
 	// Float slices aren't implemented in the pflag package...
 	// if def == nil {
 	// 	def = []float64{}

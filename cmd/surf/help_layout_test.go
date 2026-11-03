@@ -152,14 +152,6 @@ func TestHelpPutsFlagsBeforeResponseSchema(t *testing.T) {
 	}
 }
 
-// runSurfCapture runs surf with an isolated HOME and returns combined output
-// plus the process error, so tests can assert on failures too.
-func runSurfCapture(t *testing.T, bin, home string, args ...string) (string, error) {
-	t.Helper()
-	out, err := surfCmd(t, bin, home, nil, args...).CombinedOutput()
-	return string(out), err
-}
-
 // TestEmptyResultHintIntegration drives a real empty response end to end and
 // checks each output format: readable explains itself, structured formats are
 // left byte-for-byte intact, and table renders instead of panicking.
@@ -182,7 +174,7 @@ func TestEmptyResultHintIntegration(t *testing.T) {
 
 	t.Run("readable explains the empty result", func(t *testing.T) {
 		home, base := serve(t, emptyBody)
-		out, err := runSurfCapture(t, bin, home, "empty-result", "--address", "BTC",
+		out, _, err := runCapture(t, bin, home, "empty-result", "--address", "BTC",
 			"--surf-api-base-url", base, "-o", "readable")
 		if err != nil {
 			t.Fatalf("command failed: %v\n%s", err, out)
@@ -200,7 +192,7 @@ func TestEmptyResultHintIntegration(t *testing.T) {
 
 	t.Run("json keeps the envelope", func(t *testing.T) {
 		home, base := serve(t, emptyBody)
-		out, err := runSurfCapture(t, bin, home, "empty-result", "--address", "BTC",
+		out, errOut, err := runCapture(t, bin, home, "empty-result", "--address", "BTC",
 			"--surf-api-base-url", base, "--json")
 		if err != nil {
 			t.Fatalf("command failed: %v\n%s", err, out)
@@ -218,11 +210,14 @@ func TestEmptyResultHintIntegration(t *testing.T) {
 		if strings.Contains(out, "(no data)") {
 			t.Errorf("--json must not contain the readable hint:\n%s", out)
 		}
+		if !strings.Contains(errOut, "(no data)") {
+			t.Errorf("--json should explain the empty result on stderr:\n%s", errOut)
+		}
 	})
 
 	t.Run("table renders empty result", func(t *testing.T) {
 		home, base := serve(t, emptyBody)
-		out, err := runSurfCapture(t, bin, home, "empty-result", "--address", "BTC",
+		out, _, err := runCapture(t, bin, home, "empty-result", "--address", "BTC",
 			"--surf-api-base-url", base, "-o", "table")
 		if err != nil {
 			t.Fatalf("table output should not fail on an empty array: %v\n%s", err, out)
@@ -234,7 +229,7 @@ func TestEmptyResultHintIntegration(t *testing.T) {
 
 	t.Run("non-empty result is untouched", func(t *testing.T) {
 		home, base := serve(t, `{"data":[{"address":"BTC"}],"meta":{"total":1}}`)
-		out, err := runSurfCapture(t, bin, home, "empty-result", "--address", "BTC",
+		out, _, err := runCapture(t, bin, home, "empty-result", "--address", "BTC",
 			"--surf-api-base-url", base, "-o", "readable")
 		if err != nil {
 			t.Fatalf("command failed: %v\n%s", err, out)

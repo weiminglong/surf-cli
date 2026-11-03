@@ -21,6 +21,7 @@ func catalogFixture() []cli.Operation {
 			QueryParams: []*cli.Param{
 				{Name: "sort_by", Type: "string", Enum: []string{"recency", "trending"}, Default: "recency",
 					Example: "recency", Description: "Sort order"},
+				{Name: "order", Type: "string", Description: "Sort by recency order", Example: "recency"},
 				{
 					Name:        "limit",
 					Type:        "integer",
@@ -158,6 +159,11 @@ func TestOperationsJSONCompactDropsDescriptions(t *testing.T) {
 	compactFlag := flagByName(t, compact[0]["optional_flags"], "limit")
 	assert.NotContains(t, compactFlag, "description")
 	assert.Equal(t, float64(50), compactFlag["max"], "bounds survive compaction")
+
+	// An example that only repeats the description is dropped when the
+	// description is shown, but must reappear in compact output where it is not.
+	assert.NotContains(t, flagByName(t, full[0]["optional_flags"], "order"), "example")
+	assert.Equal(t, "recency", flagByName(t, compact[0]["optional_flags"], "order")["example"])
 	assert.Equal(t, []any{"recency", "trending"},
 		flagByName(t, compact[0]["optional_flags"], "sort-by")["enum"],
 		"enum survives compaction")

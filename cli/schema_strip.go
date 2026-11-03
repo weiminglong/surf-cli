@@ -169,15 +169,13 @@ func compactResponseSchemas(block string) string {
 
 		keep := keepCurrent()
 		if isProperty {
-			switch currentKey() {
-			case "meta":
-				// Direct children of meta only; nested values under a dropped
-				// field stay dropped because the parent frame's keep is false.
+			switch {
+			case currentKey() == "meta" && (len(stack) == 1 || stack[len(stack)-2].key == ""):
+				// Direct children of the envelope's meta only; a business field
+				// named "meta" inside data is ordinary data.
 				keep = keep && metaFieldsKept[key]
-			case "":
-				if key == "$schema" {
-					keep = false
-				}
+			case currentKey() == "" && key == "$schema":
+				keep = false
 			}
 		}
 
@@ -213,7 +211,7 @@ func compactResponseSchemas(block string) string {
 // must follow the `key: ` separator: a doc comment that happens to end in `{`
 // is prose, not structure.
 func isSchemaOpenLine(trimmed string) bool {
-	if trimmed == "{" || trimmed == "[" {
+	if trimmed == "{" || trimmed == "[" || strings.HasSuffix(trimmed, "Of{") {
 		return true
 	}
 	i := strings.Index(trimmed, ": ")
@@ -221,7 +219,9 @@ func isSchemaOpenLine(trimmed string) bool {
 		return false
 	}
 	rest := strings.TrimSpace(trimmed[i+2:])
-	return strings.HasPrefix(rest, "{") || strings.HasPrefix(rest, "[")
+	// Exactly "{" or "[" opens a block; "[<any>]" and "[<recursive ref>]" are
+	// complete one-line values, not openers.
+	return rest == "{" || rest == "[" || strings.HasSuffix(rest, "Of{")
 }
 
 // parseSchemaLine splits "key*: (type) desc" into its key, value and whether
@@ -304,6 +304,9 @@ func capDoc(doc string, limit int) string {
 	cut := limit
 
 	// A cut inside parentheses leaves unbalanced output; extend to the close.
+	// Once extended, leave the cut alone: backing off to a word boundary would
+	// move it back inside the parentheses and undo the balance.
+	extended := false
 	if depth := parenDepth(runes[:cut]); depth > 0 {
 		for i := cut; i < len(runes); i++ {
 			switch runes[i] {
@@ -314,15 +317,20 @@ func capDoc(doc string, limit int) string {
 			}
 			if depth == 0 {
 				cut = i + 1
+				extended = true
 				break
 			}
 		}
 	}
 
-	for i := cut - 1; i > limit/2; i-- {
-		if unicode.IsSpace(runes[i]) {
-			cut = i
-			break
+	if !extended {
+		for i := cut - 1; i > limit/2; i-- {
+			if unicode.IsSpace(runes[i]) {
+				if parenDepth(runes[:i]) == 0 {
+					cut = i
+				}
+				break
+			}
 		}
 	}
 	return strings.TrimRight(string(runes[:cut]), " ,;:") + "…"

@@ -51,14 +51,15 @@ func TestSuggestFlagNames(t *testing.T) {
 	}
 	cmd := op.Command()
 
-	// "query" should suggest the operation's own "q" first, not the global
-	// --quiet that happens to be closer by edit distance.
-	got := suggestFlagNames(cmd, "query")
-	assert.NotEmpty(t, got, "got=%v", got)
-	assert.Equal(t, "q", got[0], "got=%v", got)
+	// A single-character flag is too weak a signal for longer guesses:
+	// suggesting --q for --query/--quality/--quote is a coin flip, so stay
+	// silent rather than send an agent to the wrong flag.
+	for _, bad := range []string{"query", "quality", "quote"} {
+		assert.Empty(t, suggestFlagNames(cmd, bad), "bad=%q", bad)
+	}
 
 	// "timerange" (no dash) maps to "time-range".
-	got = suggestFlagNames(cmd, "timerange")
+	got := suggestFlagNames(cmd, "timerange")
 	assert.Contains(t, got, "time-range", "got=%v", got)
 
 	// Short guesses are too ambiguous to suggest anything.
@@ -77,17 +78,20 @@ func TestFlagErrorFuncWithSuggestions_UnknownFlag(t *testing.T) {
 		Name:        "fake",
 		Method:      http.MethodGet,
 		URITemplate: "http://example.com/fake",
-		QueryParams: []*Param{{Type: "string", Name: "q"}},
+		QueryParams: []*Param{
+			{Type: "string", Name: "q"},
+			{Type: "integer", Name: "limit"},
+		},
 	}
 	cmd := op.Command()
 
-	err := cmd.Flags().Parse([]string{"--query=foo"})
+	err := cmd.Flags().Parse([]string{"--limt=5"})
 	assert.Error(t, err)
 
 	// Run the error through our FlagErrorFunc and check the hint.
 	wrapped := flagErrorFuncWithSuggestions(cmd, err)
 	assert.Contains(t, wrapped.Error(), "Did you mean", "got: %s", wrapped.Error())
-	assert.Contains(t, wrapped.Error(), "--q", "got: %s", wrapped.Error())
+	assert.Contains(t, wrapped.Error(), "--limit", "got: %s", wrapped.Error())
 }
 
 func TestFlagErrorFuncWithSuggestions_PassThroughNonUnknown(t *testing.T) {

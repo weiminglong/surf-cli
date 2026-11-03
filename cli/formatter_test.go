@@ -408,6 +408,17 @@ func TestFormatter(t *testing.T) {
 	}
 }
 
+// formatCaptured runs Format with both streams captured.
+func formatCaptured(t *testing.T, formatter *DefaultFormatter, resp Response) (stdout, stderr string) {
+	t.Helper()
+	ob, eb := &bytes.Buffer{}, &bytes.Buffer{}
+	oldOut, oldErr := Stdout, Stderr
+	Stdout, Stderr = ob, eb
+	t.Cleanup(func() { Stdout, Stderr = oldOut, oldErr })
+	require.NoError(t, formatter.Format(resp))
+	return ob.String(), eb.String()
+}
+
 func emptyEnvelope() Response {
 	return Response{
 		Proto:   "HTTP/2.0",
@@ -463,14 +474,12 @@ func TestEmptyResultHintSkippedForStructuredFormats(t *testing.T) {
 		t.Run(format, func(t *testing.T) {
 			reset(false)
 			formatter := NewDefaultFormatter(false, false)
-			buf := &bytes.Buffer{}
-			Stdout = buf
 
 			viper.Set("rsh-output-format", format)
 			viper.Set("rsh-filter", "")
 
-			assert.NoError(t, formatter.Format(emptyEnvelope()))
-			out := buf.String()
+			out, errOut := formatCaptured(t, formatter, emptyEnvelope())
+			assert.Contains(t, errOut, "(no data)", "structured output keeps stdout parseable; note goes to stderr")
 			assert.NotContains(t, out, "(no data)")
 			assert.NotContains(t, out, "returned no rows")
 
@@ -500,14 +509,13 @@ func TestEmptyResultHintTTYAuto(t *testing.T) {
 
 	reset(false)
 	formatter := NewDefaultFormatter(true, false) // TTY
-	buf := &bytes.Buffer{}
-	Stdout = buf
 
 	viper.Set("rsh-output-format", "auto")
 	viper.Set("rsh-filter", "")
 
-	assert.NoError(t, formatter.Format(emptyEnvelope()))
-	assert.Contains(t, buf.String(), "(no data)")
+	stdout, stderr := formatCaptured(t, formatter, emptyEnvelope())
+	assert.Contains(t, stdout, "(no data)")
+	assert.Empty(t, stderr, "a terminal already shows the note")
 }
 
 func TestEmptyResultHintSkipsNonEmptyAndErrorResponses(t *testing.T) {
@@ -535,17 +543,15 @@ func TestEmptyResultHintPipedAutoKeepsJSON(t *testing.T) {
 		"piped auto output must stay parseable JSON")
 
 	formatter := NewDefaultFormatter(false, false) // non-TTY
-	buf := &bytes.Buffer{}
-	Stdout = buf
 
 	reset(false)
 	viper.Set("rsh-output-format", "auto")
 	viper.Set("rsh-filter", "")
 
-	assert.NoError(t, formatter.Format(emptyEnvelope()))
-	out := buf.String()
-	assert.NotContains(t, out, "(no data)")
-	assert.Contains(t, out, `"data"`, "piped empty result should still be JSON")
+	stdout, stderr := formatCaptured(t, formatter, emptyEnvelope())
+	assert.NotContains(t, stdout, "(no data)")
+	assert.Contains(t, stdout, `"data"`, "piped empty result should still be JSON")
+	assert.Contains(t, stderr, "(no data)", "the note moves to stderr so agents still see it")
 }
 
 // TestEmptyResultHintHandlesNullData covers services that serialise a nil
@@ -555,4 +561,32 @@ func TestEmptyResultHintHandlesNullData(t *testing.T) {
 	resp.Body.(map[string]any)["data"] = nil
 	assert.NotEmpty(t, emptyResultHint(resp, "readable", true, ""))
 	assert.Empty(t, emptyResultHint(resp, "auto", false, ""))
+}
+
+// TestEmptyResultNoteSkipsErrorEnvelope guards against hiding a 200-with-null
+// failure behind the "no data" note.
+func TestEmptyResultNoteSkipsErrorEnvelope(t *testing.T) {
+	cases := []map[string]any{
+		{"code": "UPSTREAM_ERROR", "message": "provider timed out", "data": nil},
+		{"data": nil, "error": map[string]any{"code": "UPSTREAM_ERROR"}},
+	}
+	for _, body := range cases {
+		resp := Response{Status: 200, Headers: map[string]string{}, Body: body}
+		assert.Empty(t, emptyResultNote(resp, ""), "body=%v", body)
+	}
+}
+
+// TestEmptyResultNoteSkipsPaginatedEmpty keeps has_more/next_cursor visible so
+// an empty page does not read as "nothing to page through".
+func TestEmptyResultNoteSkipsPaginatedEmpty(t *testing.T) {
+	for _, meta := range []map[string]any{
+		{"has_more": true},
+		{"next_cursor": "abc"},
+	} {
+		resp := Response{Status: 200, Headers: map[string]string{}, Body: map[string]any{
+			"data": []any{},
+			"meta": meta,
+		}}
+		assert.Empty(t, emptyResultNote(resp, ""), "meta=%v", meta)
+	}
 }

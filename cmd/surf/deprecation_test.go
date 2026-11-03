@@ -516,4 +516,49 @@ func TestUnknownFlagSuggestionEndToEnd(t *testing.T) {
 	if !strings.Contains(stderr, "Did you mean") || !strings.Contains(stderr, "--address") {
 		t.Errorf("expected a suggestion for --address, got:\n%s", stderr)
 	}
+	// The error must be reported once, without a duplicate usage dump.
+	if n := strings.Count(stderr, "Did you mean"); n != 1 {
+		t.Errorf("suggestion printed %d times:\n%s", n, stderr)
+	}
+	if strings.Contains(stderr, "\nUsage:") {
+		t.Errorf("unknown-flag error should not dump usage:\n%s", stderr)
+	}
+}
+
+// TestFallbackRefusesOldCacheVersion verifies that an expired cache written by
+// an older CLI is not served: its missing fields would be reported as absent,
+// which is exactly what the cache version exists to prevent.
+func TestFallbackRefusesOldCacheVersion(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "marketPrice", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+	expireSurfCache(t, home)
+	mutateCacheConfig(t, home, func(cfg map[string]any) {
+		cfg["surf.cache_version"] = 1
+	})
+	srv.Close()
+
+	if stdout, _, err := runCapture(t, bin, home, "list-operations", "--json"); err == nil {
+		t.Fatalf("an old cache version must not be served offline, got:\n%s", stdout)
+	}
+}
+
+// TestHelpSkipsSyncWithStaleCache verifies --help never waits on the network
+// when a usable cache exists, even an expired one.
+func TestHelpSkipsSyncWithStaleCache(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	metrics := &stubMetrics{}
+	srv := stubSpecServerWithMetrics(t, "marketPrice", false, metrics)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+	expireSurfCache(t, home)
+	metrics.reset()
+
+	if _, stderr, err := runCapture(t, bin, home, "market-price", "--help"); err != nil {
+		t.Fatalf("--help failed: %v\n%s", err, stderr)
+	}
+	if gets, _ := metrics.snapshot(); gets != 0 {
+		t.Errorf("--help with a stale cache should not fetch the spec, got %d requests", gets)
+	}
 }

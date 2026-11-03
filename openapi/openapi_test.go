@@ -296,3 +296,12 @@ func TestOpenAPIParameterUsesPluralExamples(t *testing.T) {
 	assert.Equal(t, 1.0, *got.QueryParams[0].Minimum)
 	assert.Equal(t, 10.0, *got.QueryParams[0].Maximum)
 }
+
+// TestAppendSchemaHints_LargeBoundNotScientific guards against %g formatting,
+// which renders 1000000 as 1e+06 in help and completion output.
+func TestAppendSchemaHints_LargeBoundNotScientific(t *testing.T) {
+	maximum := 1000000.0
+	got := appendSchemaHints("Page size", &base.Schema{Maximum: &maximum})
+	assert.Contains(t, got, "max 1000000")
+	assert.NotContains(t, got, "1e+06")
+}

@@ -111,6 +111,10 @@ func (o Operation) Command() *cobra.Command {
 		Args:       argSpec,
 		Hidden:     o.Hidden,
 		Deprecated: o.Deprecated,
+		// cli.Run reports the error once; letting Cobra also print it doubled
+		// the message and pushed the suggestion above a full usage dump.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 		Annotations: map[string]string{
 			HelpAfterUsageAnnotation: responses,
 		},
@@ -299,7 +303,7 @@ func suggestFlagNames(cmd *cobra.Command, bad string) []string {
 		switch {
 		case strings.HasPrefix(name, bad):
 			kind = matchNameStartsWithBad
-		case strings.HasPrefix(bad, name) && (len(name) >= 2 || local[f.Name]):
+		case strings.HasPrefix(bad, name) && (len(name) >= 2 || len(bad) <= 2):
 			kind = matchBadStartsWithName
 		case d <= 2 && minLen >= 3:
 			kind = matchDistance

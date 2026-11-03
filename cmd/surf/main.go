@@ -216,7 +216,10 @@ func main() {
 	// command → fetch the spec once so commands register and the call can
 	// proceed, instead of failing with "unknown command" or "no cached API
 	// spec — run surf sync first".
-	if cli.LoadCachedAPI("surf") == nil && needsCachedAPI() {
+	// --help must stay instant: with a usable stale cache there is nothing to
+	// gain from waiting on a spec download.
+	if cli.LoadCachedAPI("surf") == nil && needsCachedAPI() &&
+		!(helpRequested() && cli.LoadCachedAPIFallback("surf") != nil) {
 		fmt.Fprintln(os.Stderr, "No cached API spec, syncing...")
 		viper.Set("rsh-no-cache", true)
 		if _, err := cli.Load(currentSurfGatewayBase(), cli.Root); err != nil {
@@ -346,6 +349,16 @@ func shouldInjectAPIName() bool {
 		return !localCommands[cmd]
 	}
 	// No non-flag args → show help, no injection.
+	return false
+}
+
+// helpRequested reports whether this invocation is asking for help.
+func helpRequested() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
 	return false
 }
 
@@ -754,6 +767,7 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 			c.Short = op.Short
 		}
 		for i, p := range op.PathParams {
+			desc := conditionalDescription(p.Description, compact)
 			c.PositionalArgs = append(c.PositionalArgs, positionalArg{
 				Name:        p.Name,
 				Position:    i + 1,
@@ -762,12 +776,12 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 				Enum:        p.Enum,
 				Min:         p.Minimum,
 				Max:         p.Maximum,
-				Example:     p.HelpfulExample(),
-				Description: conditionalDescription(p.Description, compact),
+				Example:     p.HelpfulExampleFor(desc),
+				Description: desc,
 			})
 		}
 		for _, p := range op.QueryParams {
-			if !catalogFlagSupported(p.Type) {
+			if !p.SupportsFlag() {
 				continue
 			}
 			fc := paramToCatalog(p, compact)
@@ -778,7 +792,7 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 			}
 		}
 		for _, p := range op.HeaderParams {
-			if !catalogFlagSupported(p.Type) {
+			if !p.SupportsFlag() {
 				continue
 			}
 			fc := paramToCatalog(p, compact)
@@ -798,18 +812,6 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 	return enc.Encode(out)
 }
 
-// catalogFlagSupported mirrors cli.Param.AddFlag: types it cannot register
-// have no command-line flag, so advertising them would send an agent to a flag
-// that does not exist.
-func catalogFlagSupported(typ string) bool {
-	switch typ {
-	case "boolean", "integer", "number", "string",
-		"array[boolean]", "array[integer]", "array[string]":
-		return true
-	}
-	return false
-}
-
 // conditionalDescription drops flag documentation in compact mode.
 func conditionalDescription(desc string, compact bool) string {
 	if compact {
@@ -819,18 +821,18 @@ func conditionalDescription(desc string, compact bool) string {
 }
 
 func paramToCatalog(p *cli.Param, compact bool) flagCatalog {
-	fc := flagCatalog{
-		Name:     p.OptionName(),
-		Type:     p.Type,
-		Required: p.Required,
-		Enum:     p.Enum,
-		Min:      p.Minimum,
-		Max:      p.Maximum,
-		Default:  p.Default,
-		Example:  p.HelpfulExample(),
+	desc := conditionalDescription(p.Description, compact)
+	return flagCatalog{
+		Name:        p.OptionName(),
+		Type:        p.Type,
+		Required:    p.Required,
+		Enum:        p.Enum,
+		Min:         p.Minimum,
+		Max:         p.Maximum,
+		Default:     p.Default,
+		Example:     p.HelpfulExampleFor(desc),
+		Description: desc,
 	}
-	fc.Description = conditionalDescription(p.Description, compact)
-	return fc
 }
 
 func filterOps(ops []cli.Operation, category string) []cli.Operation {
