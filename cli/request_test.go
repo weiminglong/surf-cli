@@ -262,14 +262,17 @@ func TestRequestRetryTimeout(t *testing.T) {
 
 	reset(false)
 	viper.Set("rsh-retry", 1)
-	viper.Set("rsh-timeout", 1*time.Millisecond)
+	// Windows timer granularity is ~15ms, so a 1ms budget with a 2ms delayed
+	// reply sometimes completed before the deadline fired. Keep the delay an
+	// order of magnitude above the timeout.
+	viper.Set("rsh-timeout", 20*time.Millisecond)
 
 	// Duration string value (with units)
 	gock.New("http://example.com").
 		Get("/").
 		Times(2).
 		Reply(http.StatusOK).
-		Delay(2 * time.Millisecond)
+		Delay(200 * time.Millisecond)
 		// Note: delay seems to have a bug where subsequent requests without the
 		// delay are still delayed... For now just have it reply twice.
 
