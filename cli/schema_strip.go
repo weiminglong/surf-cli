@@ -104,7 +104,7 @@ func compactResponseSchemas(block string) string {
 	lines := strings.Split(block, "\n")
 	out := make([]string, 0, len(lines))
 	inSchema := false
-	scope := ""     // top-level property whose body we are inside: "data" or "meta"
+	scope := ""      // top-level property whose body we are inside: "data" or "meta"
 	scopeIndent := 0 // indentation of that property's opening line
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)

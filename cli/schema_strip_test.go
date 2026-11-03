@@ -206,11 +206,11 @@ func TestIsDroppedSchemaHeading(t *testing.T) {
 		{"## Option Schema:", true},
 		{"## Option Schema", true},
 		{"## Argument Schema:", true},
-		{"## Response 200 (application/json)", false},  // kept — unique return-shape info
-		{"## Response default (application/json)", false}, // kept
+		{"## Response 200 (application/json)", false},      // kept — unique return-shape info
+		{"## Response default (application/json)", false},  // kept
 		{"## Responses 200/201 (application/json)", false}, // kept
-		{"## Request Schema (application/json)", false}, // kept
-		{"## Input Example", false},                     // kept
+		{"## Request Schema (application/json)", false},    // kept
+		{"## Input Example", false},                        // kept
 		{"## Rules", false},
 		{"## Example", false},
 		{"## Time range options", false},

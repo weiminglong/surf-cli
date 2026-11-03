@@ -230,9 +230,12 @@ func main() {
 	// Populate "Available API Commands" from cached API spec as full
 	// operation commands (with flags, Long description, etc.). These are
 	// used when --help/-h skips injection, and also for Root help display.
+	// Deprecated operations are included so their help still resolves —
+	// Cobra's IsAvailableCommand already keeps them out of listings and
+	// completions.
 	if api := cli.LoadCachedAPI("surf"); api != nil {
 		for _, op := range api.Operations {
-			if op.Hidden || op.Deprecated != "" {
+			if op.Hidden {
 				continue
 			}
 			cmd := op.Command()
@@ -251,6 +254,15 @@ func main() {
 	cli.Root.AddCommand(newTelemetryCmd())
 	cli.Root.AddCommand(newFeedbackCmd())
 
+	// Cobra captures the output writer when it builds the completion commands
+	// during Execute, so this has to be set before cli.Run. Root otherwise
+	// writes to stderr to keep stdout clean for API JSON, but completion
+	// output is consumed on stdout: the generated script (`surf completion
+	// bash > f`) and the choices the shell reads from `surf __complete`.
+	if completionWritesStdout() {
+		cli.Root.SetOut(os.Stdout)
+	}
+
 	// Run.
 	err = cli.Run()
 
@@ -267,22 +279,28 @@ func main() {
 	os.Exit(exitCode)
 }
 
+// localCommands are handled by this binary instead of being routed through the
+// hidden API subcommand. One shared set avoids the two lists drifting apart —
+// they had already diverged, and __complete was in neither, so shell
+// completion requests were routed to the API subcommand and rejected.
+var localCommands = map[string]bool{
+	"auth": true, "sync": true, "catalog": true,
+	"help": true, "completion": true, "version": true, "install": true,
+	"list-operations": true, "telemetry": true, "feedback": true,
+	// Cobra's hidden shell-completion protocol commands.
+	"__complete": true, "__completeNoDesc": true,
+}
+
 // needsCachedAPI reports whether the current argv invokes a command that
-// requires the cached OpenAPI spec. Meta commands (auth, sync, help, version,
-// install, completion, telemetry, feedback, catalog) work without it.
-// list-operations DOES need it — it enumerates the spec — so it's not in
-// the meta set and will trigger auto-sync on cache miss.
+// requires the cached OpenAPI spec. Local commands work without it, except
+// list-operations, which enumerates the spec and so triggers auto-sync.
 func needsCachedAPI() bool {
-	meta := map[string]bool{
-		"auth": true, "sync": true, "catalog": true,
-		"help": true, "completion": true, "version": true, "install": true,
-		"telemetry": true, "feedback": true,
+	cmd := firstCommandArg(os.Args)
+	if cmd == "" {
+		// No command given → will show root help, no sync needed.
+		return false
 	}
-	if cmd := firstCommandArg(os.Args); cmd != "" {
-		return !meta[cmd]
-	}
-	// No command given → will show root help, no sync needed.
-	return false
+	return !localCommands[cmd] || cmd == "list-operations"
 }
 
 // shouldInjectAPIName returns true if os.Args represents an API operation
@@ -291,11 +309,6 @@ func needsCachedAPI() bool {
 // full operation command on Root (which now has complete flags and
 // descriptions from the cached API spec).
 func shouldInjectAPIName() bool {
-	local := map[string]bool{
-		"auth": true, "sync": true, "catalog": true,
-		"help": true, "completion": true, "version": true, "install": true,
-		"list-operations": true, "telemetry": true, "feedback": true,
-	}
 	// If --help or -h appears anywhere, don't inject.
 	for _, arg := range os.Args[1:] {
 		if arg == "--help" || arg == "-h" {
@@ -303,9 +316,42 @@ func shouldInjectAPIName() bool {
 		}
 	}
 	if cmd := firstCommandArg(os.Args); cmd != "" {
-		return !local[cmd]
+		return !localCommands[cmd]
 	}
 	// No non-flag args → show help, no injection.
+	return false
+}
+
+// completionWritesStdout reports whether this invocation produces output a
+// caller reads from stdout: a generated completion script, or the candidates
+// a shell consumes from the hidden __complete command. Everything else keeps
+// Root's stderr writer so API JSON owns stdout.
+func completionWritesStdout() bool {
+	switch firstCommandArg(os.Args) {
+	case "__complete", "__completeNoDesc":
+		return true
+	case "completion":
+		// `surf completion` on its own prints help, which stays on stderr;
+		// only a named shell writes a script meant for redirection.
+		seen := false
+		for _, arg := range os.Args[1:] {
+			if !seen {
+				if arg == "completion" {
+					seen = true
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			switch arg {
+			case "bash", "zsh", "fish", "powershell":
+				return true
+			default:
+				return false
+			}
+		}
+	}
 	return false
 }
 
