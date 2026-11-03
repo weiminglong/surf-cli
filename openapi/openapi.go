@@ -367,6 +367,8 @@ func openapiOperation(cmd *cobra.Command, method string, uriTemplate *url.URL, p
 			Default:     def,
 			Example:     example,
 			Enum:        enums,
+			Minimum:     schema.Minimum,
+			Maximum:     schema.Maximum,
 		}
 
 		if p.Explode != nil {

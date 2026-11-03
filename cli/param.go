@@ -37,6 +37,8 @@ type Param struct {
 	Default     any      `json:"default,omitempty" yaml:"default,omitempty"`
 	Example     any      `json:"example,omitempty" yaml:"example,omitempty"`
 	Enum        []string `json:"enum,omitempty" yaml:"enum,omitempty"`
+	Minimum     *float64 `json:"minimum,omitempty" yaml:"minimum,omitempty"`
+	Maximum     *float64 `json:"maximum,omitempty" yaml:"maximum,omitempty"`
 }
 
 // enumStringValue is a pflag.Value whose Type() reports a custom placeholder
@@ -120,10 +122,11 @@ func (p Param) OptionName() string {
 	return strcase.ToDelimited(name, '-')
 }
 
-// AddFlag adds a new option flag to a command's flag set for this parameter.
-func (p Param) AddFlag(flags *pflag.FlagSet) any {
-	name := p.OptionName()
-	def := p.Default
+// helpDescription composes the description shown in --help for this param.
+// Appends " (required)" for required params and " (example: X)" for params
+// with an example value, so agents reading --help see at a glance which flags
+// are mandatory and what a valid value looks like.
+func (p Param) helpDescription() string {
 	desc := p.Description
 	if p.Required {
 		if desc != "" {
@@ -132,6 +135,20 @@ func (p Param) AddFlag(flags *pflag.FlagSet) any {
 			desc = "(required)"
 		}
 	}
+	if p.Example != nil {
+		ex := fmt.Sprintf("%v", p.Example)
+		if ex != "" && !strings.Contains(desc, "example:") && !strings.Contains(desc, "Example:") {
+			desc = strings.TrimRight(desc, " .") + " (example: " + ex + ")"
+		}
+	}
+	return desc
+}
+
+// AddFlag adds a new option flag to a command's flag set for this parameter.
+func (p Param) AddFlag(flags *pflag.FlagSet) any {
+	name := p.OptionName()
+	def := p.Default
+	desc := p.helpDescription()
 
 	switch p.Type {
 	case "boolean":
@@ -155,8 +172,10 @@ func (p Param) AddFlag(flags *pflag.FlagSet) any {
 		}
 		if len(p.Enum) > 0 {
 			placeholder := "{" + strings.Join(p.Enum, "|") + "}"
-			// Skip the custom placeholder if it would be too wide and break
-			// alignment in --help output. pflag falls back to "string".
+			// Skip the custom placeholder if it would be too wide: pflag pads
+			// every flag line to the widest type column, so one long enum
+			// would push every description onto its own line. Wide enums are
+			// still listed in the description by appendSchemaHints.
 			if len(placeholder) <= 40 {
 				v := def.(string)
 				flags.Var(&enumStringValue{val: &v, typeStr: placeholder}, name, desc)
