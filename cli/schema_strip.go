@@ -3,6 +3,7 @@ package cli
 import (
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // HelpAfterUsageAnnotation is the command annotation that carries the
@@ -97,8 +98,8 @@ var fieldDescriptionsKept = map[string]bool{
 
 // compactResponseSchemas rewrites each ```schema fence in the response block:
 // $schema is dropped, meta is pruned to the decision fields, and field doc
-// comments keep only their first sentence. The full, unabridged descriptions
-// remain in the published OpenAPI spec.
+// comments are capped. The full, unabridged descriptions remain in the
+// published OpenAPI spec.
 func compactResponseSchemas(block string) string {
 	if block == "" {
 		return ""
@@ -107,11 +108,23 @@ func compactResponseSchemas(block string) string {
 	out := make([]string, 0, len(lines))
 	inSchema := false
 	type frame struct {
-		key  string
-		keep bool
+		key     string
+		keep    bool
+		opener  string
+		emitted bool
 	}
 	var stack []frame
 
+	// A kept meta child emits the meta opener lazily, so a meta object whose
+	// fields were all pruned disappears instead of rendering `meta*: {}`.
+	flushOpeners := func() {
+		for i := range stack {
+			if stack[i].keep && !stack[i].emitted {
+				out = append(out, stack[i].opener)
+				stack[i].emitted = true
+			}
+		}
+	}
 	keepCurrent := func() bool {
 		if len(stack) == 0 {
 			return true
@@ -140,9 +153,9 @@ func compactResponseSchemas(block string) string {
 
 		if isSchemaClose(trimmed) {
 			if len(stack) > 0 {
-				kept := stack[len(stack)-1].keep
+				f := stack[len(stack)-1]
 				stack = stack[:len(stack)-1]
-				if kept {
+				if f.emitted {
 					out = append(out, line)
 				}
 			} else {
@@ -152,7 +165,7 @@ func compactResponseSchemas(block string) string {
 		}
 
 		key, _, isProperty := parseSchemaLine(trimmed)
-		opens := isSchemaOpen(trimmed)
+		opens := isSchemaOpenLine(trimmed)
 
 		keep := keepCurrent()
 		if isProperty {
@@ -173,12 +186,20 @@ func compactResponseSchemas(block string) string {
 			if !isProperty {
 				fk = currentKey()
 			}
-			stack = append(stack, frame{key: fk, keep: keep})
+			f := frame{key: fk, keep: keep, opener: line}
+			if keep && fk != "meta" {
+				flushOpeners()
+				out = append(out, line)
+				f.emitted = true
+			}
+			stack = append(stack, f)
+			continue
 		}
 
 		if !keep {
 			continue
 		}
+		flushOpeners()
 		if isProperty && !fieldDescriptionsKept[key] {
 			out = append(out, truncateSchemaDescription(line))
 		} else {
@@ -188,12 +209,19 @@ func compactResponseSchemas(block string) string {
 	return strings.Join(out, "\n")
 }
 
-func isSchemaOpen(trimmed string) bool {
-	return strings.HasSuffix(trimmed, "{") || strings.HasSuffix(trimmed, "[")
-}
-
-func isSchemaClose(trimmed string) bool {
-	return trimmed == "}" || trimmed == "]" || trimmed == "},"
+// isSchemaOpenLine reports whether a line opens a block. The brace or bracket
+// must follow the `key: ` separator: a doc comment that happens to end in `{`
+// is prose, not structure.
+func isSchemaOpenLine(trimmed string) bool {
+	if trimmed == "{" || trimmed == "[" {
+		return true
+	}
+	i := strings.Index(trimmed, ": ")
+	if i < 0 {
+		return false
+	}
+	rest := strings.TrimSpace(trimmed[i+2:])
+	return strings.HasPrefix(rest, "{") || strings.HasPrefix(rest, "[")
 }
 
 // parseSchemaLine splits "key*: (type) desc" into its key, value and whether
@@ -212,10 +240,18 @@ func parseSchemaLine(trimmed string) (key, value string, ok bool) {
 	return key, trimmed[colon+2:], true
 }
 
-// truncateSchemaDescription keeps the key, required marker, type and the first
-// sentence of the doc comment. Units and precision usually live in that first
-// sentence ("Decimal-adjusted transfer amount as a string"), while the rest is
-// usually rationale.
+func isSchemaClose(trimmed string) bool {
+	return trimmed == "}" || trimmed == "]" || trimmed == "},"
+}
+
+// maxDocRunes caps a response field's doc comment in --help. Units and
+// precision live in the first few words, so a hard cap keeps them while
+// dropping long rationale.
+const maxDocRunes = 160
+
+// truncateSchemaDescription keeps the key, required marker, type and a capped
+// doc comment. It cuts at a word boundary, never splits a UTF-8 rune, and
+// extends to close a parenthesis rather than leaving it dangling.
 func truncateSchemaDescription(line string) string {
 	trimmed := strings.TrimSpace(line)
 	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
@@ -225,13 +261,24 @@ func truncateSchemaDescription(line string) string {
 	}
 	prefix := trimmed[:colon+2]
 	rest := trimmed[colon+2:]
-	if !strings.HasPrefix(rest, "(") {
+	doc, typeEnd, ok := splitTypeAnnotation(rest)
+	if !ok {
 		return line
 	}
+	doc = strings.TrimSpace(doc)
+	if doc == "" {
+		return indent + prefix + rest[:typeEnd]
+	}
+	return indent + prefix + rest[:typeEnd] + " " + capDoc(doc, maxDocRunes)
+}
 
-	// Find the end of the parenthesised type annotation; prose follows it.
+// splitTypeAnnotation returns the doc text following a leading "(type)" and
+// the byte offset just past that type annotation.
+func splitTypeAnnotation(rest string) (doc string, typeEnd int, ok bool) {
+	if !strings.HasPrefix(rest, "(") {
+		return "", 0, false
+	}
 	depth := 0
-	typeEnd := -1
 	for i, r := range rest {
 		switch r {
 		case '(':
@@ -239,28 +286,59 @@ func truncateSchemaDescription(line string) string {
 		case ')':
 			depth--
 			if depth == 0 {
-				typeEnd = i + 1
+				return rest[i+1:], i + 1, true
 			}
 		}
-		if typeEnd >= 0 {
+	}
+	return "", 0, false
+}
+
+// capDoc shortens prose at a word boundary. It deliberately does not split on
+// sentence periods: abbreviations such as "e.g." would leave dangling
+// fragments and drop the unit that follows.
+func capDoc(doc string, limit int) string {
+	runes := []rune(doc)
+	if len(runes) <= limit {
+		return doc
+	}
+	cut := limit
+
+	// A cut inside parentheses leaves unbalanced output; extend to the close.
+	if depth := parenDepth(runes[:cut]); depth > 0 {
+		for i := cut; i < len(runes); i++ {
+			switch runes[i] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 {
+				cut = i + 1
+				break
+			}
+		}
+	}
+
+	for i := cut - 1; i > limit/2; i-- {
+		if unicode.IsSpace(runes[i]) {
+			cut = i
 			break
 		}
 	}
-	if typeEnd < 0 {
-		return line
-	}
+	return strings.TrimRight(string(runes[:cut]), " ,;:") + "…"
+}
 
-	doc := strings.TrimSpace(rest[typeEnd:])
-	if doc == "" {
-		return indent + prefix + rest[:typeEnd]
+func parenDepth(runes []rune) int {
+	depth := 0
+	for _, r := range runes {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
 	}
-	if idx := strings.Index(doc, ". "); idx > 0 {
-		doc = doc[:idx+1]
-	}
-	if len(doc) > 160 {
-		doc = strings.TrimRight(doc[:160], " ") + "…"
-	}
-	return indent + prefix + rest[:typeEnd] + " " + doc
+	return depth
 }
 
 func appendTo(mode int, line string, above, below *[]string) {

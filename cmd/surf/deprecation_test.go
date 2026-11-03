@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -24,7 +26,32 @@ func runCapture(t *testing.T, bin, home string, args ...string) (stdout, stderr 
 // stubSpecServer serves a one-operation OpenAPI spec. Using a stub instead of
 // the live cached spec keeps these tests deterministic: the deprecated and
 // completion paths must work regardless of what the current spec contains.
+// stubMetrics counts requests the CLI makes to the stub, so tests can assert
+// that completion does not sync or post telemetry.
+type stubMetrics struct {
+	mu          sync.Mutex
+	openapiGets int
+	eventPosts  int
+}
+
+func (m *stubMetrics) snapshot() (openapiGets, eventPosts int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.openapiGets, m.eventPosts
+}
+
+func (m *stubMetrics) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.openapiGets, m.eventPosts = 0, 0
+}
+
 func stubSpecServer(t *testing.T, operationID string, deprecated bool) *httptest.Server {
+	t.Helper()
+	return stubSpecServerWithMetrics(t, operationID, deprecated, nil)
+}
+
+func stubSpecServerWithMetrics(t *testing.T, operationID string, deprecated bool, metrics *stubMetrics) *httptest.Server {
 	t.Helper()
 	dep := ""
 	if deprecated {
@@ -50,12 +77,26 @@ func stubSpecServer(t *testing.T, operationID string, deprecated bool) *httptest
 }`, operationID, dep)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/gateway/openapi.json" {
+		switch {
+		case r.URL.Path == "/gateway/openapi.json":
+			if metrics != nil {
+				metrics.mu.Lock()
+				metrics.openapiGets++
+				metrics.mu.Unlock()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, spec)
+		case r.URL.Path == "/gateway/cli/event":
+			if metrics != nil {
+				metrics.mu.Lock()
+				metrics.eventPosts++
+				metrics.mu.Unlock()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, "{}")
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, spec)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -267,5 +308,212 @@ func TestCompactImpliesJSON(t *testing.T) {
 	}
 	if len(ops) != 1 || ops[0]["name"] != "new-thing" {
 		t.Errorf("unexpected catalog: %s", stdout)
+	}
+}
+
+// runCaptureEnv runs surf with an explicit environment, replacing any keys it
+// overrides so duplicate entries cannot make the result OS-dependent.
+func runCaptureEnv(t *testing.T, bin, home string, extra map[string]string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	merged := map[string]string{
+		"HOME": home, "USERPROFILE": home,
+		"SURF_API_BASE_URL": "", "SURF_TELEMETRY_DISABLED": "1",
+		"HTTP_PROXY": "", "HTTPS_PROXY": "", "ALL_PROXY": "", "NO_PROXY": "*",
+		"http_proxy": "", "https_proxy": "", "all_proxy": "", "no_proxy": "*",
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	env := make([]string, 0, len(os.Environ())+len(merged))
+	for _, kv := range os.Environ() {
+		key := kv
+		if i := strings.Index(kv, "="); i >= 0 {
+			key = kv[:i]
+		}
+		if _, replaced := merged[key]; !replaced {
+			env = append(env, kv)
+		}
+	}
+	for k, v := range merged {
+		env = append(env, k+"="+v)
+	}
+
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	so, se := splitOutput(cmd)
+	err = cmd.Run()
+	return so.String(), se.String(), err
+}
+
+// mutateCacheConfig edits ~/.surf/config.json in the isolated HOME.
+func mutateCacheConfig(t *testing.T, home string, mutate func(map[string]any)) {
+	t.Helper()
+	path := filepath.Join(home, ".surf", "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cache config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("parse cache config: %v", err)
+	}
+	mutate(cfg)
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode cache config: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("write cache config: %v", err)
+	}
+}
+
+// TestCacheVersionMismatchResyncs guards against a CLI upgrade silently
+// serving a cache that predates new fields (enums, bounds, examples).
+func TestCacheVersionMismatchResyncs(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	metrics := &stubMetrics{}
+	srv := stubSpecServerWithMetrics(t, "newThing", false, metrics)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	mutateCacheConfig(t, home, func(cfg map[string]any) {
+		cfg["surf.cache_version"] = 1
+	})
+	metrics.reset()
+
+	stdout, stderr, err := runCapture(t, bin, home, "list-operations", "--json")
+	if err != nil {
+		t.Fatalf("list-operations failed: %v\n%s", err, stderr)
+	}
+	if gets, _ := metrics.snapshot(); gets == 0 {
+		t.Errorf("a cache written by an older CLI should be re-synced, got %d spec requests", gets)
+	}
+	var ops []map[string]any
+	if jerr := json.Unmarshal([]byte(stdout), &ops); jerr != nil {
+		t.Fatalf("output is not JSON: %v", jerr)
+	}
+}
+
+// TestCompletionOfflineWithExpiredCache verifies that help/list operations fall
+// back to an expired cache when the network is unavailable.
+func TestOfflineExpiredCacheStillServesMetadata(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "marketPrice", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+	expireSurfCache(t, home)
+	srv.Close() // make every later request fail
+
+	stdout, stderr, err := runCapture(t, bin, home, "list-operations", "--json")
+	if err != nil {
+		t.Fatalf("list-operations should fall back to the stale cache: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "market-price") {
+		t.Errorf("stale catalog missing commands:\n%s", stdout)
+	}
+
+	_, _, err = runCapture(t, bin, home, "market-price", "--help")
+	if err != nil {
+		t.Fatalf("--help should fall back to the stale cache: %v", err)
+	}
+}
+
+// TestCompletionProtocolWithHelpWord guards a regression where any --help in
+// the completed line sent candidates to stderr, leaving the shell empty.
+func TestCompletionProtocolWithHelpWord(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "newThing", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	stdout, stderr, err := runCapture(t, bin, home, "__complete", "new-thing", "--help", "")
+	if err != nil {
+		t.Fatalf("__complete failed: %v\n%s", err, stderr)
+	}
+	if stdout == "" {
+		t.Errorf("completion candidates must go to stdout even when the line contains --help")
+	}
+}
+
+// TestInvalidCompletionKeepsStdoutClean verifies usage for a bad invocation
+// stays on stderr, so `surf completion bash > file` cannot capture an error.
+func TestInvalidCompletionKeepsStdoutClean(t *testing.T) {
+	bin := buildBareSurfBin(t)
+
+	stdout, stderr, err := runCapture(t, bin, t.TempDir(), "completion", "bash", "extra")
+	if err == nil {
+		t.Fatal("extra arguments should fail")
+	}
+	if stdout != "" {
+		t.Errorf("invalid completion invocation wrote to stdout:\n%s", stdout)
+	}
+	if stderr == "" {
+		t.Error("expected usage/error on stderr")
+	}
+}
+
+// TestCompletionSkipsTelemetry verifies Tab never posts a telemetry event,
+// while a normal local command still does.
+func TestCompletionSkipsTelemetry(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	metrics := &stubMetrics{}
+	srv := stubSpecServerWithMetrics(t, "newThing", false, metrics)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	env := map[string]string{"SURF_TELEMETRY_DISABLED": "0", "SURF_API_BASE_URL": srv.URL + "/gateway"}
+
+	metrics.reset()
+	if _, stderr, err := runCaptureEnv(t, bin, home, env, "__complete", ""); err != nil {
+		t.Fatalf("__complete failed: %v\n%s", err, stderr)
+	}
+	if _, posts := metrics.snapshot(); posts != 0 {
+		t.Errorf("__complete posted %d telemetry events", posts)
+	}
+
+	metrics.reset()
+	if _, stderr, err := runCaptureEnv(t, bin, home, env, "version"); err != nil {
+		t.Fatalf("version failed: %v\n%s", err, stderr)
+	}
+	// version is not a completion invocation, so it still reports.
+	if _, posts := metrics.snapshot(); posts == 0 {
+		t.Errorf("a normal command should still report telemetry")
+	}
+}
+
+// TestListOperationsJSONAlone verifies --json works without --compact.
+func TestListOperationsJSONAlone(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "newThing", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	stdout, stderr, err := runCapture(t, bin, home, "list-operations", "--json")
+	if err != nil {
+		t.Fatalf("list-operations --json failed: %v\n%s", err, stderr)
+	}
+	var ops []map[string]any
+	if jerr := json.Unmarshal([]byte(stdout), &ops); jerr != nil {
+		t.Fatalf("--json should emit JSON, got: %v\n%s", jerr, stdout)
+	}
+	if len(ops) != 1 || ops[0]["name"] != "new-thing" {
+		t.Errorf("unexpected catalog: %s", stdout)
+	}
+}
+
+// TestUnknownFlagSuggestionEndToEnd proves the suggestion hook is wired onto
+// the command, not only callable in isolation.
+func TestUnknownFlagSuggestionEndToEnd(t *testing.T) {
+	bin := buildBareSurfBin(t)
+	home := t.TempDir()
+	srv := stubSpecServer(t, "newThing", false)
+	seedSurfSpecCache(t, bin, home, srv.URL+"/gateway", srv.URL+"/gateway/openapi.json")
+
+	_, stderr, err := runCapture(t, bin, home, "new-thing", "--adress", "x")
+	if err == nil {
+		t.Fatal("an unknown flag should fail")
+	}
+	if !strings.Contains(stderr, "Did you mean") || !strings.Contains(stderr, "--address") {
+		t.Errorf("expected a suggestion for --address, got:\n%s", stderr)
 	}
 }

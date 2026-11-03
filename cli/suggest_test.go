@@ -132,3 +132,39 @@ func TestHelpDescription_SkipsExampleIfAlreadyInText(t *testing.T) {
 	got := p.helpDescription()
 	assert.NotContains(t, got, "(example: ETH)", "got=%q", got)
 }
+
+func TestSuggestFlagNames_UnambiguousShorterPrefix(t *testing.T) {
+	op := Operation{
+		Name:        "fake",
+		Method:      http.MethodGet,
+		URITemplate: "http://example.com/fake",
+		QueryParams: []*Param{
+			{Type: "string", Name: "time_range"},
+			{Type: "string", Name: "q"},
+		},
+	}
+	cmd := op.Command()
+
+	// --time is an unambiguous prefix of --time-range.
+	got := suggestFlagNames(cmd, "time")
+	assert.Equal(t, []string{"time-range"}, got)
+}
+
+func TestHelpDescription_SkipsRedundantExample(t *testing.T) {
+	// Example already present in the description.
+	p := Param{Name: "symbol", Type: "string", Description: "Ticker symbol, e.g. BTC", Example: "BTC"}
+	assert.NotContains(t, p.helpDescription(), "(example:")
+
+	// Example equals the default.
+	p = Param{Name: "period", Type: "string", Description: "Window", Example: "30d", Default: "30d"}
+	assert.NotContains(t, p.helpDescription(), "(example:")
+
+	// Still shown when it adds information.
+	p = Param{Name: "chain", Type: "string", Description: "Chain", Example: "ethereum", Default: "base"}
+	assert.Contains(t, p.helpDescription(), "(example: ethereum)")
+}
+
+func TestHelpDescription_NoLeadingSpace(t *testing.T) {
+	p := Param{Name: "note", Type: "string", Example: "only"}
+	assert.Equal(t, "(example: only)", p.helpDescription())
+}

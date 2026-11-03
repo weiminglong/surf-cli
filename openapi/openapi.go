@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/danielgtaylor/casing"
@@ -236,23 +237,32 @@ func appendSchemaHints(desc string, s *base.Schema) string {
 		// Skip if the description already lists the first enum value
 		// (some specs embed enum info in the description text).
 		if !strings.Contains(desc, vals[0]) {
-			desc += " (one of: " + strings.Join(vals, ", ") + ")"
+			desc = appendHint(desc, "one of: "+strings.Join(vals, ", "))
 		}
 	}
 	if s.Minimum != nil || s.Maximum != nil {
 		var parts []string
 		if s.Minimum != nil {
-			parts = append(parts, fmt.Sprintf("min %.0f", *s.Minimum))
+			parts = append(parts, "min "+strconv.FormatFloat(*s.Minimum, 'g', -1, 64))
 		}
 		if s.Maximum != nil {
-			parts = append(parts, fmt.Sprintf("max %.0f", *s.Maximum))
+			parts = append(parts, "max "+strconv.FormatFloat(*s.Maximum, 'g', -1, 64))
 		}
-		hint := strings.Join(parts, ", ")
-		if !strings.Contains(desc, hint) {
-			desc += " (" + hint + ")"
-		}
+		desc = appendHint(desc, strings.Join(parts, ", "))
 	}
 	return desc
+}
+
+// appendHint adds a parenthesised note without leaving a leading space when
+// the description is empty.
+func appendHint(desc, hint string) string {
+	if strings.Contains(desc, hint) {
+		return desc
+	}
+	if desc == "" {
+		return "(" + hint + ")"
+	}
+	return strings.TrimRight(desc, " .") + " (" + hint + ")"
 }
 
 func paramSchema(p *cli.Param, s *base.Schema) string {
@@ -638,6 +648,7 @@ func openapiOperation(cmd *cobra.Command, method string, uriTemplate *url.URL, p
 		QueryParams:   queryParams,
 		HeaderParams:  headerParams,
 		BodyMediaType: mediaType,
+		BodyRequired:  op.RequestBody != nil && op.RequestBody.Required != nil && *op.RequestBody.Required,
 		Examples:      examples,
 		Hidden:        hidden,
 		Deprecated:    dep,

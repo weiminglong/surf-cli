@@ -137,11 +137,43 @@ func (p Param) helpDescription() string {
 	}
 	if p.Example != nil {
 		ex := fmt.Sprintf("%v", p.Example)
-		if ex != "" && !strings.Contains(desc, "example:") && !strings.Contains(desc, "Example:") {
-			desc = strings.TrimRight(desc, " .") + " (example: " + ex + ")"
+		if ex != "" && !p.exampleRedundant(desc, ex) {
+			if desc == "" {
+				desc = "(example: " + ex + ")"
+			} else {
+				desc = strings.TrimRight(desc, " .") + " (example: " + ex + ")"
+			}
 		}
 	}
 	return desc
+}
+
+// HelpfulExample returns the example when it adds information beyond the
+// description and default, or nil when it would just repeat them. Used by the
+// JSON catalog so the agent-facing index stays lean.
+func (p Param) HelpfulExample() any {
+	if p.Example == nil {
+		return nil
+	}
+	ex := fmt.Sprintf("%v", p.Example)
+	if ex == "" || p.exampleRedundant(p.Description, ex) {
+		return nil
+	}
+	return p.Example
+}
+
+// exampleRedundant reports whether showing the example would repeat something
+// the reader already has: the same value as the default, or text that already
+// appears in the description. Most Surf parameters carry both an enum and an
+// example, so without this check the hint adds tokens instead of information.
+func (p Param) exampleRedundant(desc, example string) bool {
+	if strings.Contains(desc, "example:") || strings.Contains(desc, "Example:") {
+		return true
+	}
+	if strings.Contains(desc, example) {
+		return true
+	}
+	return p.Default != nil && fmt.Sprintf("%v", p.Default) == example
 }
 
 // AddFlag adds a new option flag to a command's flag set for this parameter.
@@ -186,11 +218,23 @@ func (p Param) AddFlag(flags *pflag.FlagSet) any {
 	case "array[boolean]":
 		if def == nil {
 			def = []bool{}
+		} else if anyList, ok := def.([]any); ok {
+			typed := make([]bool, len(anyList))
+			for i, item := range anyList {
+				typed[i] = item.(bool)
+			}
+			def = typed
 		}
 		return flags.BoolSlice(name, def.([]bool), desc)
 	case "array[integer]":
 		if def == nil {
 			def = []int{}
+		} else if anyList, ok := def.([]any); ok {
+			typed := make([]int, len(anyList))
+			for i, item := range anyList {
+				typed[i] = typeConvert(item, 0).(int)
+			}
+			def = typed
 		}
 		return flags.IntSlice(name, def.([]int), desc)
 	case "array[number]":

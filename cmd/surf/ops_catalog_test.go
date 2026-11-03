@@ -19,7 +19,8 @@ func catalogFixture() []cli.Operation {
 			Group:  "news",
 			Short:  "Crypto news",
 			QueryParams: []*cli.Param{
-				{Name: "sort_by", Type: "string", Enum: []string{"recency", "trending"}, Description: "Sort order"},
+				{Name: "sort_by", Type: "string", Enum: []string{"recency", "trending"}, Default: "recency",
+					Example: "recency", Description: "Sort order"},
 				{
 					Name:        "limit",
 					Type:        "integer",
@@ -35,7 +36,7 @@ func catalogFixture() []cli.Operation {
 			Method: "GET",
 			Short:  "Search tokens by symbol",
 			QueryParams: []*cli.Param{
-				{Name: "q", Type: "string", Required: true, Description: "Query"},
+				{Name: "q", Type: "string", Required: true, Example: "uniswap", Description: "Query"},
 			},
 		},
 		{
@@ -44,8 +45,25 @@ func catalogFixture() []cli.Operation {
 			Short:       "Get a job",
 			URITemplate: "https://example.com/jobs/{job_id}",
 			PathParams: []*cli.Param{
-				{Name: "job_id", Type: "string", Required: true, Description: "Job identifier"},
+				{Name: "job_id", Type: "string", Required: true, Example: "job-123", Description: "Job identifier"},
 			},
+		},
+		{
+			Name:          "submit",
+			Method:        "POST",
+			Short:         "Submit a query",
+			BodyMediaType: "application/json",
+			BodyRequired:  true,
+		},
+		{
+			Name:       "retired",
+			Method:     "GET",
+			Deprecated: "do not use",
+		},
+		{
+			Name:   "internal",
+			Method: "GET",
+			Hidden: true,
 		},
 	}
 }
@@ -67,7 +85,13 @@ func decodeCatalog(t *testing.T, ops []cli.Operation, compact bool) []map[string
 
 func TestOperationsJSONIncludesEnumsAndBounds(t *testing.T) {
 	out := decodeCatalog(t, catalogFixture(), false)
-	require.Len(t, out, 3)
+	require.Len(t, out, 4)
+
+	// Hidden and deprecated operations must not be advertised.
+	for _, op := range out {
+		assert.NotEqual(t, "retired", op["name"])
+		assert.NotEqual(t, "internal", op["name"])
+	}
 
 	sortBy := flagByName(t, out[0]["optional_flags"], "sort-by")
 	assert.Equal(t, []any{"recency", "trending"}, sortBy["enum"])
@@ -80,6 +104,12 @@ func TestOperationsJSONIncludesEnumsAndBounds(t *testing.T) {
 	required := out[1]["required_flags"].([]any)
 	require.Len(t, required, 1)
 	assert.Equal(t, "q", required[0].(map[string]any)["name"])
+	assert.Equal(t, "uniswap", required[0].(map[string]any)["example"],
+		"an example that adds information should be kept")
+
+	// An example equal to the default is noise and must be dropped.
+	redundantSort := flagByName(t, out[0]["optional_flags"], "sort-by")
+	assert.NotContains(t, redundantSort, "example")
 }
 
 // TestOperationsJSONPathParamsArePositional guards against advertising path
@@ -98,6 +128,18 @@ func TestOperationsJSONPathParamsArePositional(t *testing.T) {
 	assert.Equal(t, "job_id", arg["name"])
 	assert.Equal(t, float64(1), arg["position"])
 	assert.Equal(t, true, arg["required"])
+	assert.Equal(t, "job-123", arg["example"], "path parameter examples should survive")
+}
+
+// TestOperationsJSONBodyMetadata covers body-type operations: an agent must be
+// able to tell that a body is required before calling.
+func TestOperationsJSONBodyMetadata(t *testing.T) {
+	out := decodeCatalog(t, catalogFixture(), false)
+	submit := out[3]
+
+	assert.Equal(t, true, submit["has_body"])
+	assert.Equal(t, true, submit["body_required"])
+	assert.Equal(t, "application/json", submit["body_media_type"])
 }
 
 func TestOperationsJSONCompactDropsDescriptions(t *testing.T) {

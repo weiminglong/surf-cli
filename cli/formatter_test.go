@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPrintable(t *testing.T) {
@@ -471,11 +473,41 @@ func TestEmptyResultHintSkippedForStructuredFormats(t *testing.T) {
 			out := buf.String()
 			assert.NotContains(t, out, "(no data)")
 			assert.NotContains(t, out, "returned no rows")
-			if format == "table" {
+
+			// Absence of the hint is not enough: the data must still be there.
+			switch format {
+			case "json":
+				var body map[string]any
+				require.NoError(t, json.Unmarshal([]byte(out), &body))
+				assert.Contains(t, body, "data")
+				assert.Equal(t, []any{}, body["data"])
+			case "yaml":
+				assert.Contains(t, out, "data: []")
+			case "gron":
+				assert.Contains(t, out, "body.data = [];")
+			case "table":
 				assert.Contains(t, out, "(no rows)")
 			}
 		})
 	}
+}
+
+// TestEmptyResultHintTTYAuto covers the primary interactive case: a terminal
+// with the default format must explain an empty result.
+func TestEmptyResultHintTTYAuto(t *testing.T) {
+	assert.NotEmpty(t, emptyResultHint(emptyEnvelope(), "auto", true, ""),
+		"TTY + auto should explain an empty result")
+
+	reset(false)
+	formatter := NewDefaultFormatter(true, false) // TTY
+	buf := &bytes.Buffer{}
+	Stdout = buf
+
+	viper.Set("rsh-output-format", "auto")
+	viper.Set("rsh-filter", "")
+
+	assert.NoError(t, formatter.Format(emptyEnvelope()))
+	assert.Contains(t, buf.String(), "(no data)")
 }
 
 func TestEmptyResultHintSkipsNonEmptyAndErrorResponses(t *testing.T) {

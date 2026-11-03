@@ -270,11 +270,14 @@ func TestOpenAPIOperationParameterWithoutSchema(t *testing.T) {
 // TestOpenAPIParameterUsesPluralExamples covers OpenAPI 3.1 specs, which use
 // `examples`; the Surf spec has 400+ such parameters and no singular ones.
 func TestOpenAPIParameterUsesPluralExamples(t *testing.T) {
+	min, max := 1.0, 10.0
 	schema := base.CreateSchemaProxy(&base.Schema{
 		Type: []string{"string"},
 		Examples: []*yaml.Node{
 			{Kind: yaml.ScalarNode, Value: "ethereum"},
 		},
+		Minimum: &min,
+		Maximum: &max,
 	})
 	uri, _ := url.Parse("https://example.com/things")
 	op := &v3.Operation{
@@ -288,4 +291,8 @@ func TestOpenAPIParameterUsesPluralExamples(t *testing.T) {
 	got := openapiOperation(nil, http.MethodGet, uri, &v3.PathItem{}, op)
 	require.Len(t, got.QueryParams, 1)
 	assert.Equal(t, "ethereum", got.QueryParams[0].Example)
+	require.NotNil(t, got.QueryParams[0].Minimum)
+	require.NotNil(t, got.QueryParams[0].Maximum)
+	assert.Equal(t, 1.0, *got.QueryParams[0].Minimum)
+	assert.Equal(t, 10.0, *got.QueryParams[0].Maximum)
 }

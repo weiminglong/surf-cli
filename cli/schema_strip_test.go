@@ -3,6 +3,7 @@ package cli
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -240,6 +241,7 @@ func TestSplitHelpBlocks(t *testing.T) {
 		"",
 		"```schema",
 		"{",
+		"  $schema: (string format:uri) A URL to the JSON Schema for this object.",
 		"  data*: [",
 		"    {",
 		"      id*: (string) Article ID. Use with the detail endpoint",
@@ -347,15 +349,17 @@ func TestCompactResponseSchemas_DropsNestedMetaSubtree(t *testing.T) {
 	assert.Equal(t, strings.Count(got, "{"), strings.Count(got, "}"), got)
 }
 
-// TestCompactResponseSchemas_KeepsFirstSentence verifies that units and other
-// semantics in a field's first sentence survive compaction.
-func TestCompactResponseSchemas_KeepsFirstSentence(t *testing.T) {
+// TestCompactResponseSchemas_CapsLongDocs verifies that a long doc keeps its
+// beginning (where units live) and drops the tail, without splitting on
+// sentence periods.
+func TestCompactResponseSchemas_CapsLongDocs(t *testing.T) {
+	long := "Decimal-adjusted transfer amount as a string. " + strings.Repeat("extra rationale ", 20)
 	block := strings.Join([]string{
 		"```schema",
 		"{",
 		"  data*: [",
 		"    {",
-		"      amount*: (string) Decimal-adjusted transfer amount as a string. Raw base units live in amount_raw.",
+		"      amount*: (string) " + long,
 		"    }",
 		"  ]",
 		"}",
@@ -364,5 +368,71 @@ func TestCompactResponseSchemas_KeepsFirstSentence(t *testing.T) {
 
 	got := compactResponseSchemas(block)
 	assert.Contains(t, got, "Decimal-adjusted transfer amount as a string.")
-	assert.NotContains(t, got, "Raw base units live in amount_raw")
+	assert.NotContains(t, got, strings.Repeat("extra rationale", 10))
+	assert.Contains(t, got, "…")
+}
+
+// TestCompactResponseSchemas_KeepsAbbreviations guards against splitting prose
+// on periods inside abbreviations: "e.g." used to leave a dangling fragment and
+// drop the unit or example that followed.
+func TestCompactResponseSchemas_KeepsAbbreviations(t *testing.T) {
+	block := strings.Join([]string{
+		"```schema",
+		"{",
+		"  data*: [",
+		"    {",
+		"      name*: (string) Token name, e.g. Tesla xStock",
+		"      distance: (number) Fraction the mark must move (e.g. 0.05 = 5%), always positive",
+		"    }",
+		"  ]",
+		"}",
+		"```",
+	}, "\n")
+
+	got := compactResponseSchemas(block)
+	assert.Contains(t, got, "Token name, e.g. Tesla xStock")
+	assert.Contains(t, got, "(e.g. 0.05 = 5%)")
+	assert.NotContains(t, got, "e.g.\n")
+}
+
+// TestCompactResponseSchemas_DropsEmptyMeta verifies that a meta object whose
+// fields were all pruned disappears instead of rendering `meta*: {}`.
+func TestCompactResponseSchemas_DropsEmptyMeta(t *testing.T) {
+	block := strings.Join([]string{
+		"```schema",
+		"{",
+		"  data*: [",
+		"    {",
+		"      id*: (string) Identifier",
+		"    }",
+		"  ]",
+		"  meta*: {",
+		"    cached*: (boolean) Served from cache",
+		"  }",
+		"}",
+		"```",
+	}, "\n")
+
+	got := compactResponseSchemas(block)
+	assert.NotContains(t, got, "meta")
+	assert.Equal(t, strings.Count(got, "{"), strings.Count(got, "}"), got)
+}
+
+// TestCapDocUTF8 ensures truncation never splits a rune.
+func TestCapDocUTF8(t *testing.T) {
+	doc := strings.Repeat("区", 300)
+	got := capDoc(doc, 160)
+	assert.True(t, utf8.ValidString(got), "truncated doc must remain valid UTF-8")
+	assert.LessOrEqual(t, len([]rune(got)), 161) // 160 runes + ellipsis
+}
+
+func TestIsSchemaOpenLine(t *testing.T) {
+	assert.True(t, isSchemaOpenLine("{"))
+	assert.True(t, isSchemaOpenLine("["))
+	assert.True(t, isSchemaOpenLine("data*: ["))
+	assert.True(t, isSchemaOpenLine("pricing: {"))
+	assert.True(t, isSchemaOpenLine("<any>: ["))
+	assert.False(t, isSchemaOpenLine("foo: (string) see docs {"),
+		"a brace inside a description is prose, not structure")
+	assert.False(t, isSchemaOpenLine("total: (integer) 3"))
 }

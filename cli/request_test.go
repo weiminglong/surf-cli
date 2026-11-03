@@ -279,3 +279,19 @@ func TestRequestRetryTimeout(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorContains(t, err, "timed out")
 }
+
+func TestParseRetryAfter(t *testing.T) {
+	d, ok := parseRetryAfter("7")
+	assert.True(t, ok)
+	assert.Equal(t, 7*time.Second, d)
+
+	// HTTP-date form: covers the http.ParseTime branch directly so a broken
+	// parse cannot hide behind the one-second default.
+	target := time.Now().Add(5 * time.Second).UTC().Truncate(time.Second)
+	d, ok = parseRetryAfter(target.Format(http.TimeFormat))
+	assert.True(t, ok)
+	assert.InDelta(t, 5.0, d.Seconds(), 1.5)
+
+	_, ok = parseRetryAfter("not-a-date")
+	assert.False(t, ok)
+}

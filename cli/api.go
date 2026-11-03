@@ -96,6 +96,7 @@ func cacheAPI(name string, api *API) {
 		Cache.Set(name+".base", base)
 	}
 	Cache.Set(name+".expires", time.Now().Add(24*time.Hour))
+	Cache.Set(name+".cache_version", apiCacheVersion)
 	if err := Cache.WriteConfig(); err != nil {
 		// Without the persisted expiry, LoadCachedAPI treats the cache as
 		// missing and every subsequent invocation re-syncs the spec.
@@ -134,12 +135,28 @@ func apiCacheMatchesBase(name string) bool {
 	return Cache.GetString(name+".base") == expected
 }
 
+// apiCacheVersion bumps whenever the cached representation gains or changes
+// fields (for example flag enums, bounds, or examples). A cache written by an
+// older CLI still decodes, but would silently report the new fields as absent,
+// so a mismatch is treated as a miss and re-synced.
+const apiCacheVersion = 3
+
 // LoadCachedAPI loads an API from the local cache without making network
 // requests. Returns nil if no valid cache exists or is expired.
 // Unlike Load, this skips the version check since it is used only to
 // populate command names and descriptions for help output.
 func LoadCachedAPI(name string) *API {
 	return loadCachedAPI(name, false)
+}
+
+// LoadCachedAPIFallback returns a fresh cached API, falling back to an expired
+// one. Read-only local commands (help, catalog listings) prefer an old spec
+// over failing when the cache has aged out and the network is unavailable.
+func LoadCachedAPIFallback(name string) *API {
+	if api := loadCachedAPI(name, false); api != nil {
+		return api
+	}
+	return loadCachedAPI(name, true)
 }
 
 // LoadCachedAPIAllowStale is LoadCachedAPI without the TTL check. Shell
@@ -157,6 +174,9 @@ func loadCachedAPI(name string, allowStale bool) *API {
 	if !allowStale {
 		expires := Cache.GetTime(name + ".expires")
 		if expires.IsZero() || !time.Now().Before(expires) {
+			return nil
+		}
+		if Cache.GetInt(name+".cache_version") != apiCacheVersion {
 			return nil
 		}
 	}

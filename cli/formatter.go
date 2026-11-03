@@ -636,7 +636,7 @@ func emptyResultHint(resp Response, outFormat string, tty bool, filter string) s
 	b.WriteString("  - filters that match nothing (project name, address, time window)\n")
 	b.WriteString("  - required parameters accepted but too narrow\n\n")
 	b.WriteString("Check the parameters with `--help`, or find the right endpoint with `list-operations`.\n")
-	b.WriteString("Use `--json` to print the full response envelope unchanged.")
+	b.WriteString("Use `--json` to print the raw JSON body.")
 	if hint, ok := body["meta"].(map[string]any); ok {
 		if reason, ok := hint["empty_reason"].(string); ok && reason != "" {
 			b.WriteString("\n\nempty_reason: " + reason)

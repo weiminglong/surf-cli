@@ -232,10 +232,9 @@ func main() {
 	// Deprecated operations are included so their help still resolves —
 	// Cobra's IsAvailableCommand already keeps them out of listings and
 	// completions.
-	// Shell completion must never wait on the network, so it reads the cached
-	// spec even after its TTL; otherwise the first Tab of the day returns no
-	// commands at all.
-	loadForCommands := cli.LoadCachedAPI
+	// Completion and help are read-only: an expired cache still beats an empty
+	// command tree, and completion must never wait on the network.
+	loadForCommands := cli.LoadCachedAPIFallback
 	if isCompletionProtocol() {
 		loadForCommands = cli.LoadCachedAPIAllowStale
 	}
@@ -281,13 +280,20 @@ func main() {
 		exitCode = cli.GetExitCode()
 	}
 
-	// Shell completion runs on every Tab and its output is consumed by the
-	// shell, so it must not post telemetry: a slow request would stall the
-	// prompt and the event stream would fill with __complete noise.
-	if !isCompletionProtocol() {
+	// Completion runs on every Tab (and at shell startup for the generated
+	// script), so it must not post telemetry: the synchronous request would
+	// stall the prompt, and the event stream would fill with completion noise.
+	if !isCompletionInvocation() {
 		cli.ReportCLIEvent(cli.GetCurrentCommand(), exitCode, errMsg)
 	}
 	os.Exit(exitCode)
+}
+
+// isCompletionInvocation reports whether this invocation exists only to serve
+// shell completion: either a completion protocol request or a generated
+// completion script.
+func isCompletionInvocation() bool {
+	return isCompletionProtocol() || firstCommandArg(os.Args) == "completion"
 }
 
 // isCompletionProtocol reports whether this invocation is one of Cobra's
@@ -348,39 +354,67 @@ func shouldInjectAPIName() bool {
 // a shell consumes from the hidden __complete command. Everything else keeps
 // Root's stderr writer so API JSON owns stdout.
 func completionWritesStdout() bool {
-	// --help is a normal help request and belongs on stderr like every other
-	// command's help.
-	for _, arg := range os.Args[1:] {
-		if arg == "--help" || arg == "-h" {
-			return false
-		}
-	}
-	switch firstCommandArg(os.Args) {
+	args := os.Args[1:]
+	cmd := firstCommandArg(os.Args)
+
+	switch cmd {
 	case "__complete", "__completeNoDesc":
-		return true
+		// The shell always passes at least the word being completed, possibly
+		// an empty string. A bare invocation is invalid; its usage belongs on
+		// stderr like every other error.
+		for i, a := range args {
+			if a == cmd {
+				return len(args) > i+1
+			}
+		}
+		return false
 	case "completion":
-		// `surf completion` on its own prints help, which stays on stderr;
-		// only a named shell writes a script meant for redirection.
-		seen := false
-		for _, arg := range os.Args[1:] {
-			if !seen {
-				if arg == "completion" {
-					seen = true
-				}
-				continue
-			}
-			if strings.HasPrefix(arg, "-") {
-				continue
-			}
-			switch arg {
-			case "bash", "zsh", "fish", "powershell":
-				return true
-			default:
+		// Help is a normal help request, so it stays on stderr.
+		for _, a := range args {
+			if a == "--help" || a == "-h" {
 				return false
 			}
 		}
+		positionals := positionalsAfter(args, "completion")
+		if len(positionals) != 1 {
+			return false
+		}
+		switch positionals[0] {
+		case "bash", "zsh", "fish", "powershell":
+			return true
+		}
 	}
 	return false
+}
+
+// positionalsAfter returns the non-flag arguments following cmd, skipping the
+// values consumed by global flags such as `-o json` or `-s http://...`.
+func positionalsAfter(args []string, cmd string) []string {
+	var out []string
+	seen := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !seen {
+			if arg == cmd {
+				seen = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			if flagConsumesValue(arg) && !strings.Contains(arg, "=") {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			if shortFlagConsumesValue(arg) && len(arg) == 2 {
+				i++
+			}
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 func firstCommandArg(argv []string) string {
@@ -623,7 +657,7 @@ func newListOperationsCmd() *cobra.Command {
 		Long:  "Show available API endpoints with methods, parameters, and descriptions.\nRun `surf sync` first if no operations appear.\n\nUse --detail to show full descriptions (useful for choosing between similar endpoints).\nUse --category to filter by group name.\nUse --json to emit a machine-readable command catalog (for agents): name, method, group, required/optional flags with type, enum values, bounds, description, default, and example.\nAdd --compact to --json to drop descriptions and summaries — the smallest form that still carries every enum and bound, so an agent can plan calls without reading --help.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			api := cli.LoadCachedAPI("surf")
+			api := cli.LoadCachedAPIFallback("surf")
 			if api == nil {
 				return fmt.Errorf("no cached API spec — run `surf sync` first")
 			}
@@ -658,6 +692,7 @@ func newListOperationsCmd() *cobra.Command {
 // call will be rejected.
 type flagCatalog struct {
 	Name        string   `json:"name"`
+	In          string   `json:"in,omitempty"`
 	Type        string   `json:"type"`
 	Required    bool     `json:"required,omitempty"`
 	Enum        []string `json:"enum,omitempty"`
@@ -678,6 +713,8 @@ type opCatalog struct {
 	RequiredFlags  []flagCatalog   `json:"required_flags,omitempty"`
 	OptionalFlags  []flagCatalog   `json:"optional_flags,omitempty"`
 	HasBody        bool            `json:"has_body,omitempty"`
+	BodyRequired   bool            `json:"body_required,omitempty"`
+	BodyMediaType  string          `json:"body_media_type,omitempty"`
 }
 
 // positionalArg is a path parameter. It is passed positionally
@@ -689,6 +726,9 @@ type positionalArg struct {
 	Type        string   `json:"type"`
 	Required    bool     `json:"required,omitempty"`
 	Enum        []string `json:"enum,omitempty"`
+	Min         *float64 `json:"min,omitempty"`
+	Max         *float64 `json:"max,omitempty"`
+	Example     any      `json:"example,omitempty"`
 	Description string   `json:"description,omitempty"`
 }
 
@@ -703,10 +743,12 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 			continue
 		}
 		c := opCatalog{
-			Name:    op.Name,
-			Method:  op.Method,
-			Group:   op.Group,
-			HasBody: op.BodyMediaType != "",
+			Name:          op.Name,
+			Method:        op.Method,
+			Group:         op.Group,
+			HasBody:       op.BodyMediaType != "",
+			BodyRequired:  op.BodyRequired,
+			BodyMediaType: op.BodyMediaType,
 		}
 		if !compact {
 			c.Short = op.Short
@@ -718,10 +760,16 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 				Type:        p.Type,
 				Required:    p.Required,
 				Enum:        p.Enum,
+				Min:         p.Minimum,
+				Max:         p.Maximum,
+				Example:     p.HelpfulExample(),
 				Description: conditionalDescription(p.Description, compact),
 			})
 		}
 		for _, p := range op.QueryParams {
+			if !catalogFlagSupported(p.Type) {
+				continue
+			}
 			fc := paramToCatalog(p, compact)
 			if p.Required {
 				c.RequiredFlags = append(c.RequiredFlags, fc)
@@ -730,7 +778,11 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 			}
 		}
 		for _, p := range op.HeaderParams {
+			if !catalogFlagSupported(p.Type) {
+				continue
+			}
 			fc := paramToCatalog(p, compact)
+			fc.In = "header"
 			if p.Required {
 				c.RequiredFlags = append(c.RequiredFlags, fc)
 			} else {
@@ -744,6 +796,18 @@ func printOperationsJSON(ops []cli.Operation, compact bool) error {
 		enc.SetIndent("", "  ")
 	}
 	return enc.Encode(out)
+}
+
+// catalogFlagSupported mirrors cli.Param.AddFlag: types it cannot register
+// have no command-line flag, so advertising them would send an agent to a flag
+// that does not exist.
+func catalogFlagSupported(typ string) bool {
+	switch typ {
+	case "boolean", "integer", "number", "string",
+		"array[boolean]", "array[integer]", "array[string]":
+		return true
+	}
+	return false
 }
 
 // conditionalDescription drops flag documentation in compact mode.
@@ -763,7 +827,7 @@ func paramToCatalog(p *cli.Param, compact bool) flagCatalog {
 		Min:      p.Minimum,
 		Max:      p.Maximum,
 		Default:  p.Default,
-		Example:  p.Example,
+		Example:  p.HelpfulExample(),
 	}
 	fc.Description = conditionalDescription(p.Description, compact)
 	return fc

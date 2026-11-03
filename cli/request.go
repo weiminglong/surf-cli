@@ -275,6 +275,18 @@ func MakeRequest(req *http.Request, options ...requestOption) (*http.Response, e
 	return resp, nil
 }
 
+// parseRetryAfter parses a Retry-After header, which may be either a number of
+// seconds or an HTTP date.
+func parseRetryAfter(v string) (time.Duration, bool) {
+	if seconds, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return time.Duration(seconds) * time.Second, true
+	}
+	if when, err := http.ParseTime(v); err == nil {
+		return time.Until(when), true
+	}
+	return 0, false
+}
+
 // isRetryable returns true if a request should be retried.
 func isRetryable(code int) bool {
 	if code == /* 408 */ http.StatusRequestTimeout ||
@@ -350,13 +362,8 @@ func doRequestWithRetry(log bool, client *http.Client, req *http.Request) (*http
 			retryAfter := 1 * time.Second
 
 			if v := resp.Header.Get("Retry-After"); v != "" {
-				// Could be either an integer number of seconds, or an HTTP date.
-				if d, err := strconv.ParseInt(v, 10, 64); err == nil {
-					retryAfter = time.Duration(d) * time.Second
-				}
-
-				if d, err := http.ParseTime(v); err == nil {
-					retryAfter = time.Until(d)
+				if d, ok := parseRetryAfter(v); ok {
+					retryAfter = d
 				}
 			}
 

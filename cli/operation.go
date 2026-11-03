@@ -28,6 +28,7 @@ type Operation struct {
 	QueryParams   []*Param `json:"query_params,omitempty" yaml:"query_params,omitempty"`
 	HeaderParams  []*Param `json:"header_params,omitempty" yaml:"header_params,omitempty"`
 	BodyMediaType string   `json:"body_media_type,omitempty" yaml:"body_media_type,omitempty"`
+	BodyRequired  bool     `json:"body_required,omitempty" yaml:"body_required,omitempty"`
 	Examples      []string `json:"examples,omitempty" yaml:"examples,omitempty"`
 	Hidden        bool     `json:"hidden,omitempty" yaml:"hidden,omitempty"`
 	Deprecated    string   `json:"deprecated,omitempty" yaml:"deprecated,omitempty"`
@@ -296,7 +297,7 @@ func suggestFlagNames(cmd *cobra.Command, bad string) []string {
 
 		kind := -1
 		switch {
-		case strings.HasPrefix(name, bad) && (len(bad) <= 2 || len(name)-len(bad) <= 2):
+		case strings.HasPrefix(name, bad):
 			kind = matchNameStartsWithBad
 		case strings.HasPrefix(bad, name) && (len(name) >= 2 || local[f.Name]):
 			kind = matchBadStartsWithName
